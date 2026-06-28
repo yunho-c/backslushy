@@ -36,6 +36,7 @@
 
 	let query = $state("");
 	let inputRef: HTMLInputElement | null = $state(null);
+	let panelRef: HTMLElement | null = $state(null);
 
 	function filteredItems() {
 		const normalizedQuery = query.trim().toLowerCase();
@@ -60,16 +61,23 @@
 		}
 	}
 
+	function handleWindowClick(event: MouseEvent) {
+		if (event.target instanceof Node && !panelRef?.contains(event.target)) {
+			void hideLauncher();
+		}
+	}
+
 	$effect(() => {
 		inputRef?.focus();
 	});
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onclick={handleWindowClick} onkeydown={handleKeydown} />
 
-<main class="min-h-screen bg-transparent p-3 text-foreground antialiased">
+<main class="grid min-h-screen place-items-center bg-transparent p-16 text-foreground antialiased">
 	<section
-		class="launcher-shell overflow-hidden rounded-lg border border-white/12 bg-zinc-950/92 text-zinc-50 shadow-2xl shadow-black/45 backdrop-blur-2xl"
+		bind:this={panelRef}
+		class="launcher-shell w-[720px] overflow-hidden rounded-lg border border-white/12 bg-zinc-950/92 text-zinc-50 shadow-2xl shadow-black/45 backdrop-blur-2xl"
 	>
 		<div class="flex h-14 items-center gap-3 px-4">
 			<div class="flex size-8 shrink-0 items-center justify-center rounded-md bg-cyan-300 text-zinc-950">

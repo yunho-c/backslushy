@@ -13,8 +13,9 @@
     "windows": [
       {
         "title": "bkslash",
-        "width": 720,
-        "height": 420,
+        "width": 840,
+        "height": 540,
+        "backgroundColor": "#00000000",
         "center": true,
         "decorations": false,
         "resizable": false,
@@ -23,6 +24,7 @@
         "shadow": true
       }
     ],
+    "macOSPrivateApi": true,
     "security": {
       "csp": null
     }
