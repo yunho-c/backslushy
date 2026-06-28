@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from "svelte";
 	import { invoke } from "@tauri-apps/api/core";
+	import { listen } from "@tauri-apps/api/event";
 	import {
 		loadAliases,
 		makeAlias,
@@ -260,6 +261,16 @@
 		}
 	}
 
+	function focusLauncherField() {
+		void tick().then(() => {
+			if (mode === "search") {
+				inputRef?.focus();
+			} else {
+				expansionRef?.focus();
+			}
+		});
+	}
+
 	$effect(() => {
 		if (!loaded) return;
 		saveAliases(aliases);
@@ -273,7 +284,14 @@
 	onMount(() => {
 		aliases = loadAliases();
 		loaded = true;
-		void tick().then(() => inputRef?.focus());
+		focusLauncherField();
+
+		let unlisten: (() => void) | undefined;
+		void listen("launcher-shown", focusLauncherField).then((cleanup) => {
+			unlisten = cleanup;
+		});
+
+		return () => unlisten?.();
 	});
 </script>
 

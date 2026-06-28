@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[cfg(target_os = "macos")]
@@ -25,6 +25,37 @@ fn macos_launcher_surface(
 }
 
 #[cfg(target_os = "macos")]
+fn launcher_panel_class() -> &'static objc2::runtime::AnyClass {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+    use objc2::{class, sel};
+    use std::sync::OnceLock;
+
+    extern "C" fn can_become_key_window(_this: &AnyObject, _sel: Sel) -> Bool {
+        Bool::YES
+    }
+
+    extern "C" fn can_become_main_window(_this: &AnyObject, _sel: Sel) -> Bool {
+        Bool::YES
+    }
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    CLASS.get_or_init(|| unsafe {
+        let superclass = class!(NSPanel);
+        let mut builder = ClassBuilder::new(c"BkslashLauncherPanel", superclass)
+            .expect("BkslashLauncherPanel class should register once");
+        builder.add_method::<AnyObject, _>(
+            sel!(canBecomeKeyWindow),
+            can_become_key_window as extern "C" fn(_, _) -> _,
+        );
+        builder.add_method::<AnyObject, _>(
+            sel!(canBecomeMainWindow),
+            can_become_main_window as extern "C" fn(_, _) -> _,
+        );
+        builder.register()
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn configure_macos_launcher_window(app: &tauri::App, window: &WebviewWindow) {
     let _ = app
         .handle()
@@ -32,26 +63,30 @@ fn configure_macos_launcher_window(app: &tauri::App, window: &WebviewWindow) {
     let _ = app.handle().set_dock_visibility(false);
 
     if let (Ok(ns_window), Ok(ns_view)) = (window.ns_window(), window.ns_view()) {
-        use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
+        use objc2::{msg_send, rc::Retained, MainThreadMarker};
         use objc2_app_kit::{
             NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSPanel, NSResponder,
             NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
         };
 
-        let Some(mtm) = MainThreadMarker::new() else {
+        let Some(_mtm) = MainThreadMarker::new() else {
             return;
         };
         let ns_window = unsafe { &*(ns_window.cast::<NSWindow>()) };
         let ns_view = unsafe { &*(ns_view.cast::<NSView>()) };
         let frame = ns_window.frame();
 
-        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            frame,
-            NSWindowStyleMask::NonactivatingPanel,
-            NSBackingStoreType::Buffered,
-            false,
-        );
+        let panel = unsafe {
+            let allocated: objc2::rc::Allocated<NSPanel> =
+                msg_send![launcher_panel_class(), alloc];
+            NSPanel::initWithContentRect_styleMask_backing_defer(
+                allocated,
+                frame,
+                NSWindowStyleMask::NonactivatingPanel,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
 
         panel.setFloatingPanel(true);
         panel.setBecomesKeyOnlyIfNeeded(false);
@@ -126,6 +161,7 @@ fn show_launcher(window: &WebviewWindow) {
     let _ = window.unminimize();
 
     focus_launcher_window(window);
+    let _ = window.emit("launcher-shown", ());
 }
 
 #[cfg(target_os = "macos")]
