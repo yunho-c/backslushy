@@ -1,8 +1,18 @@
 # bkslash
 
-A desktop-only Tauri 2 launcher scaffold using SvelteKit, Tailwind CSS v4, and shadcn-svelte.
+A desktop-only Tauri 2 lookup-table alias launcher using SvelteKit, Tailwind CSS v4, and shadcn-svelte.
 
 The app starts with its main window hidden. Press the backslash key (`\`) to toggle the launcher, and press `Esc` inside the launcher to hide it again.
+
+## Alias Workflow
+
+Type an alias such as `gsuir` to reveal its expansion, then press `Enter` to copy it. Unknown aliases can be created in place with `Cmd+N` or the `+` button. Select an existing alias and press `Tab` to edit it.
+
+Aliases are stored locally in browser storage for now. The default set includes:
+
+```text
+gsuir -> git submodule update --init --recursive
+```
 
 ## Development
 
