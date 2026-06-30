@@ -471,15 +471,19 @@
 							}}
 						>
 							<div class="min-w-0">
-								<div class="flex items-center gap-2">
-									<span class="font-mono text-base font-semibold tracking-normal text-zinc-100">
-										{result.alias.key}
-									</span>
-									{#if result.exact}
-										<Badge class="bg-cyan-300 text-zinc-950">exact</Badge>
-									{/if}
+								<div class="flex min-w-0 items-baseline gap-3">
+									<div class="flex min-w-0 shrink-0 items-center gap-2">
+										<span class="truncate text-base font-semibold tracking-normal text-zinc-100">
+											{result.alias.key}
+										</span>
+										{#if result.exact}
+											<Badge class="bg-cyan-300 text-zinc-950">exact</Badge>
+										{/if}
+									</div>
+									<div class="min-w-0 flex-1 truncate text-right font-mono text-xs text-zinc-400">
+										{result.alias.expansion}
+									</div>
 								</div>
-								<div class="truncate font-mono text-xs text-zinc-400">{result.alias.expansion}</div>
 								{#if result.alias.description}
 									<div class="truncate text-xs text-zinc-600">{result.alias.description}</div>
 								{/if}
