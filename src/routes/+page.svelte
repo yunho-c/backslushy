@@ -24,6 +24,9 @@
 	type CreateResult = { kind: "create"; key: string; expansion: string };
 	type Result = AliasResult | CreateResult;
 
+	const LAUNCHER_SHADOW_MARGIN_PX = 48;
+	const LAUNCHER_HEIGHT_EPSILON_PX = 1;
+
 	let query = $state("");
 	let inputRef: HTMLInputElement | null = $state(null);
 	let expansionRef: HTMLTextAreaElement | null = $state(null);
@@ -41,6 +44,8 @@
 	let draftExpansion = $state("");
 	let draftDescription = $state("");
 	let draftTags = $state("");
+	let lastRequestedLauncherHeight = 0;
+	let pendingLauncherResizeFrame: number | null = null;
 
 	function results(): Result[] {
 		const normalizedQuery = query.trim().toLowerCase();
@@ -349,6 +354,40 @@
 		});
 	}
 
+	function scheduleLauncherResize(animated = launcherStage === "shown") {
+		if (typeof window === "undefined") return;
+		if (pendingLauncherResizeFrame !== null) {
+			window.cancelAnimationFrame(pendingLauncherResizeFrame);
+		}
+
+		pendingLauncherResizeFrame = window.requestAnimationFrame(() => {
+			pendingLauncherResizeFrame = null;
+			void updateLauncherHeight(animated);
+		});
+	}
+
+	async function updateLauncherHeight(animated: boolean) {
+		await tick();
+		if (!panelRef) return;
+
+		const shellHeight = panelRef.getBoundingClientRect().height;
+		const targetHeight = Math.ceil(shellHeight + LAUNCHER_SHADOW_MARGIN_PX * 2);
+		if (Math.abs(targetHeight - lastRequestedLauncherHeight) < LAUNCHER_HEIGHT_EPSILON_PX) {
+			return;
+		}
+
+		try {
+			await invoke("set_launcher_height_command", {
+				height: targetHeight,
+				animated,
+			});
+			lastRequestedLauncherHeight = targetHeight;
+		} catch (error) {
+			lastRequestedLauncherHeight = 0;
+			console.warn("[bkslash] failed to resize launcher", error);
+		}
+	}
+
 	$effect(() => {
 		if (!loaded) return;
 		saveAliases(aliases);
@@ -357,6 +396,14 @@
 	$effect(() => {
 		query;
 		selectedIndex = 0;
+	});
+
+	$effect(() => {
+		if (!loaded) return;
+		mode;
+		launcherStage;
+		results().length;
+		scheduleLauncherResize();
 	});
 
 	onMount(() => {
@@ -369,8 +416,18 @@
 		focusLauncherField();
 
 		const unlisteners: Array<() => void> = [];
+		let resizeObserver: ResizeObserver | null = null;
+		void tick().then(() => {
+			if (!panelRef) return;
+
+			resizeObserver = new ResizeObserver(() => scheduleLauncherResize());
+			resizeObserver.observe(panelRef);
+			scheduleLauncherResize(false);
+		});
+
 		void listen("launcher-showing", () => {
 			launcherStage = "showing";
+			scheduleLauncherResize(false);
 			window.requestAnimationFrame(() => {
 				if (launcherStage === "showing") {
 					launcherStage = "shown";
@@ -383,6 +440,7 @@
 				launcherStage = "shown";
 			}
 			logFocusDiagnostics("frontend-launcher-shown");
+			scheduleLauncherResize(false);
 			focusLauncherField();
 		}).then((cleanup) => unlisteners.push(cleanup));
 
@@ -395,6 +453,10 @@
 		}).then((cleanup) => unlisteners.push(cleanup));
 
 		return () => {
+			resizeObserver?.disconnect();
+			if (pendingLauncherResizeFrame !== null) {
+				window.cancelAnimationFrame(pendingLauncherResizeFrame);
+			}
 			for (const unlisten of unlisteners) {
 				unlisten();
 			}
@@ -452,7 +514,7 @@
 		<Separator class="bg-white/10" />
 
 		{#if mode === "search"}
-			<div class="grid min-h-[230px] gap-1 px-2 py-2">
+			<div class="grid auto-rows-min content-start gap-1 px-2 py-2">
 				{#each results() as result, index}
 					{#if result.kind === "alias"}
 						{@const expansionPreview = formatAliasExpansion(result.alias.expansion)}
@@ -537,13 +599,13 @@
 						</button>
 					{/if}
 				{:else}
-					<div class="flex h-[216px] items-center justify-center px-6 text-center text-sm text-zinc-500">
+					<div class="flex h-24 items-center justify-center px-6 text-center text-sm text-zinc-500">
 						No aliases yet.
 					</div>
 				{/each}
 			</div>
 		{:else}
-			<form class="grid min-h-[230px] gap-3 px-4 py-4" onsubmit={(event) => event.preventDefault()}>
+			<form class="grid gap-3 px-4 py-4" onsubmit={(event) => event.preventDefault()}>
 				<div class="grid grid-cols-[170px_1fr] gap-3">
 					<label class="grid gap-1 text-xs font-medium text-zinc-500">
 						Alias

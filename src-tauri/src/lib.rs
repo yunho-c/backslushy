@@ -9,6 +9,12 @@ const LAUNCHER_CLOSE_ANIMATION_MS: u64 = 110;
 const LAUNCHER_ANIMATION_FRAME_MS: u64 = 16;
 #[cfg(target_os = "macos")]
 const PASTE_DISPATCH_DELAY_MS: u64 = LAUNCHER_CLOSE_ANIMATION_MS + 55;
+#[cfg(target_os = "macos")]
+const LAUNCHER_MIN_HEIGHT: f64 = 220.0;
+#[cfg(target_os = "macos")]
+const LAUNCHER_MAX_HEIGHT: f64 = 560.0;
+#[cfg(target_os = "macos")]
+const LAUNCHER_SCREEN_MARGIN: f64 = 80.0;
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
@@ -19,9 +25,9 @@ struct MacosLauncherSurface {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
-struct LauncherPosition {
+struct LauncherAnchor {
     x: f64,
-    y: f64,
+    top_y: f64,
 }
 
 #[cfg(target_os = "macos")]
@@ -48,7 +54,7 @@ static MACOS_LAUNCHER_SURFACE: std::sync::Mutex<Option<MacosLauncherSurface>> =
     std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
-static SAVED_LAUNCHER_POSITION: std::sync::Mutex<Option<LauncherPosition>> =
+static SAVED_LAUNCHER_ANCHOR: std::sync::Mutex<Option<LauncherAnchor>> =
     std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
@@ -163,79 +169,148 @@ fn clamp_axis(value: f64, min: f64, max: f64) -> f64 {
 }
 
 #[cfg(target_os = "macos")]
-fn position_inside_rect(position: LauncherPosition, rect: &objc2_foundation::NSRect) -> bool {
-    position.x >= rect.origin.x
-        && position.x <= rect.origin.x + rect.size.width
-        && position.y >= rect.origin.y
-        && position.y <= rect.origin.y + rect.size.height
+fn point_inside_rect(x: f64, y: f64, rect: &objc2_foundation::NSRect) -> bool {
+    x >= rect.origin.x
+        && x <= rect.origin.x + rect.size.width
+        && y >= rect.origin.y
+        && y <= rect.origin.y + rect.size.height
 }
 
 #[cfg(target_os = "macos")]
-fn clamp_launcher_position(
-    position: LauncherPosition,
+fn visible_frame_for_launcher_frame(
     frame: objc2_foundation::NSRect,
-) -> LauncherPosition {
+) -> Option<objc2_foundation::NSRect> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSScreen;
 
     let Some(mtm) = MainThreadMarker::new() else {
-        return position;
+        return None;
     };
 
-    let window_center = LauncherPosition {
-        x: position.x + frame.size.width / 2.0,
-        y: position.y + frame.size.height / 2.0,
-    };
+    let center_x = frame.origin.x + frame.size.width / 2.0;
+    let center_y = frame.origin.y + frame.size.height / 2.0;
     let screens = NSScreen::screens(mtm);
 
-    let visible_frame = (0..screens.count())
+    (0..screens.count())
         .map(|index| screens.objectAtIndex(index).visibleFrame())
-        .find(|visible_frame| position_inside_rect(window_center, visible_frame))
-        .or_else(|| NSScreen::mainScreen(mtm).map(|screen| screen.visibleFrame()));
+        .find(|visible_frame| point_inside_rect(center_x, center_y, visible_frame))
+        .or_else(|| NSScreen::mainScreen(mtm).map(|screen| screen.visibleFrame()))
+}
 
-    let Some(visible_frame) = visible_frame else {
-        return position;
+#[cfg(target_os = "macos")]
+fn clamp_launcher_frame(frame: objc2_foundation::NSRect) -> objc2_foundation::NSRect {
+    let Some(visible_frame) = visible_frame_for_launcher_frame(frame) else {
+        return frame;
     };
 
-    LauncherPosition {
-        x: clamp_axis(
-            position.x,
-            visible_frame.origin.x,
-            visible_frame.origin.x + visible_frame.size.width - frame.size.width,
-        ),
-        y: clamp_axis(
-            position.y,
-            visible_frame.origin.y,
-            visible_frame.origin.y + visible_frame.size.height - frame.size.height,
-        ),
+    let mut clamped_frame = frame;
+    clamped_frame.origin.x = clamp_axis(
+        frame.origin.x,
+        visible_frame.origin.x,
+        visible_frame.origin.x + visible_frame.size.width - frame.size.width,
+    );
+    clamped_frame.origin.y = clamp_axis(
+        frame.origin.y,
+        visible_frame.origin.y,
+        visible_frame.origin.y + visible_frame.size.height - frame.size.height,
+    );
+    clamped_frame
+}
+
+#[cfg(target_os = "macos")]
+fn clamp_launcher_height(height: f64, frame: objc2_foundation::NSRect) -> f64 {
+    let screen_max_height = visible_frame_for_launcher_frame(frame)
+        .map(|visible_frame| visible_frame.size.height - LAUNCHER_SCREEN_MARGIN)
+        .unwrap_or(LAUNCHER_MAX_HEIGHT);
+    height.clamp(
+        LAUNCHER_MIN_HEIGHT,
+        LAUNCHER_MAX_HEIGHT.min(screen_max_height).max(LAUNCHER_MIN_HEIGHT),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn launcher_frame_for_height(
+    panel: &objc2_app_kit::NSPanel,
+    height: f64,
+) -> objc2_foundation::NSRect {
+    let mut frame = panel.frame();
+    let top_y = frame.origin.y + frame.size.height;
+    let height = clamp_launcher_height(height, frame);
+    frame.origin.y = top_y - height;
+    frame.size.height = height;
+    clamp_launcher_frame(frame)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_launcher_frame(
+    panel: &objc2_app_kit::NSPanel,
+    ns_view: &objc2_app_kit::NSView,
+    frame: objc2_foundation::NSRect,
+    animated: bool,
+) {
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let view_frame = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(frame.size.width, frame.size.height),
+    );
+    ns_view.setFrame(view_frame);
+    panel.setFrame_display_animate(frame, true, animated);
+}
+
+#[cfg(target_os = "macos")]
+fn resize_launcher_panel(height: f64, animated: bool) -> Result<(), String> {
+    use objc2::MainThreadMarker;
+
+    if MainThreadMarker::new().is_none() {
+        return Err("launcher resize must run on the main thread".to_string());
     }
+
+    let Some((panel, ns_view)) = macos_launcher_surface() else {
+        return Err("launcher panel was not initialized".to_string());
+    };
+
+    let frame = launcher_frame_for_height(panel, height);
+    apply_launcher_frame(panel, ns_view, frame, animated && panel.isVisible());
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resize_launcher_window(window: &WebviewWindow, height: f64) -> Result<(), String> {
+    use tauri::{LogicalSize, Size};
+
+    let current_size = window.inner_size().map_err(|error| error.to_string())?;
+    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
+    let width = current_size.width as f64 / scale_factor;
+    window
+        .set_size(Size::Logical(LogicalSize::new(width, height.max(220.0))))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "macos")]
 fn save_launcher_position(panel: &objc2_app_kit::NSPanel) {
-    let origin = panel.frame().origin;
-    if let Ok(mut saved_position) = SAVED_LAUNCHER_POSITION.lock() {
-        *saved_position = Some(LauncherPosition {
-            x: origin.x,
-            y: origin.y,
+    let frame = panel.frame();
+    if let Ok(mut saved_anchor) = SAVED_LAUNCHER_ANCHOR.lock() {
+        *saved_anchor = Some(LauncherAnchor {
+            x: frame.origin.x,
+            top_y: frame.origin.y + frame.size.height,
         });
     }
 }
 
 #[cfg(target_os = "macos")]
 fn restore_launcher_position_or_center(panel: &objc2_app_kit::NSPanel) {
-    let saved_position = SAVED_LAUNCHER_POSITION
+    let saved_anchor = SAVED_LAUNCHER_ANCHOR
         .lock()
         .ok()
-        .and_then(|saved_position| *saved_position);
+        .and_then(|saved_anchor| *saved_anchor);
 
-    if let Some(saved_position) = saved_position {
-        let frame = panel.frame();
-        let position = clamp_launcher_position(saved_position, frame);
-        let mut origin = frame.origin;
-        origin.x = position.x;
-        origin.y = position.y;
-        panel.setFrameOrigin(origin);
+    if let Some(saved_anchor) = saved_anchor {
+        let mut frame = panel.frame();
+        frame.origin.x = saved_anchor.x;
+        frame.origin.y = saved_anchor.top_y - frame.size.height;
+        let frame = clamp_launcher_frame(frame);
+        panel.setFrame_display(frame, true);
         return;
     }
 
@@ -697,6 +772,26 @@ fn hide_launcher_command(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn set_launcher_height_command(
+    app: AppHandle,
+    height: f64,
+    animated: bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        resize_launcher_panel(height, animated)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = animated;
+        let window = main_window(&app)?;
+        resize_launcher_window(&window, height)
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn start_launcher_drag_command() -> Result<(), String> {
@@ -838,6 +933,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             hide_launcher_command,
+            set_launcher_height_command,
             start_launcher_drag_command,
             paste_alias_command,
             focus_diagnostics_enabled,
