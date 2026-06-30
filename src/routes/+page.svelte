@@ -37,6 +37,7 @@
 	let status = $state("Ready");
 	let loaded = $state(false);
 	let focusDiagnosticsEnabled = $state(false);
+	let resizeDiagnosticsEnabled = $state(false);
 	let launcherStage = $state<LauncherStage>("hidden");
 
 	let editingId = $state<string | null>(null);
@@ -132,6 +133,34 @@
 		};
 		console.info("[bkslash:focus]", payload);
 		void invoke("log_frontend_focus_diagnostic", { stage, detail: payload });
+	}
+
+	function rectSummary(rect: DOMRect) {
+		return {
+			x: Math.round(rect.x),
+			y: Math.round(rect.y),
+			width: Math.round(rect.width),
+			height: Math.round(rect.height),
+			top: Math.round(rect.top),
+			bottom: Math.round(rect.bottom),
+		};
+	}
+
+	function logResizeDiagnostics(stage: string, detail: Record<string, unknown> = {}) {
+		if (!resizeDiagnosticsEnabled) return;
+
+		const payload = {
+			stage,
+			mode,
+			launcherStage,
+			queryLength: query.length,
+			resultCount: results().length,
+			windowWidth: window.innerWidth,
+			windowHeight: window.innerHeight,
+			...detail,
+		};
+		console.info("[bkslash:resize]", payload);
+		void invoke("log_frontend_resize_diagnostic", { stage, detail: payload });
 	}
 
 	async function hideLauncher() {
@@ -360,6 +389,7 @@
 			window.cancelAnimationFrame(pendingLauncherResizeFrame);
 		}
 
+		logResizeDiagnostics("frontend-schedule", { animated });
 		pendingLauncherResizeFrame = window.requestAnimationFrame(() => {
 			pendingLauncherResizeFrame = null;
 			void updateLauncherHeight(animated);
@@ -370,20 +400,37 @@
 		await tick();
 		if (!panelRef) return;
 
-		const shellHeight = panelRef.getBoundingClientRect().height;
+		const panelRect = panelRef.getBoundingClientRect();
+		const shellHeight = panelRect.height;
 		const targetHeight = Math.ceil(shellHeight + LAUNCHER_SHADOW_MARGIN_PX * 2);
+		logResizeDiagnostics("frontend-measure", {
+			animated,
+			panelRect: rectSummary(panelRect),
+			shellHeight,
+			shadowMargin: LAUNCHER_SHADOW_MARGIN_PX,
+			targetHeight,
+			lastRequestedLauncherHeight,
+		});
 		if (Math.abs(targetHeight - lastRequestedLauncherHeight) < LAUNCHER_HEIGHT_EPSILON_PX) {
+			logResizeDiagnostics("frontend-skip-unchanged", { targetHeight });
 			return;
 		}
 
 		try {
+			logResizeDiagnostics("frontend-before-request", { targetHeight, animated });
 			await invoke("set_launcher_height_command", {
 				height: targetHeight,
 				animated,
 			});
 			lastRequestedLauncherHeight = targetHeight;
+			logResizeDiagnostics("frontend-after-request", { targetHeight, animated });
 		} catch (error) {
 			lastRequestedLauncherHeight = 0;
+			logResizeDiagnostics("frontend-request-error", {
+				targetHeight,
+				animated,
+				message: error instanceof Error ? error.message : String(error),
+			});
 			console.warn("[bkslash] failed to resize launcher", error);
 		}
 	}
@@ -412,6 +459,10 @@
 		void invoke<boolean>("focus_diagnostics_enabled").then((enabled) => {
 			focusDiagnosticsEnabled = enabled;
 			logFocusDiagnostics("frontend-diagnostics-ready");
+		});
+		void invoke<boolean>("resize_diagnostics_enabled").then((enabled) => {
+			resizeDiagnosticsEnabled = enabled;
+			logResizeDiagnostics("frontend-diagnostics-ready");
 		});
 		focusLauncherField();
 
@@ -466,7 +517,7 @@
 
 <svelte:window onclick={handleWindowClick} onkeydown={handleKeydown} />
 
-<main class="grid min-h-screen place-items-center bg-transparent p-16 text-foreground antialiased">
+<main class="grid min-h-screen content-start justify-center bg-transparent px-[60px] py-12 text-foreground antialiased">
 	<section
 		bind:this={panelRef}
 		data-launcher-stage={launcherStage}

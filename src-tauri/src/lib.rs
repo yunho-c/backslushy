@@ -76,7 +76,15 @@ fn macos_launcher_surface() -> Option<(
 }
 
 fn focus_diagnostics_enabled_flag() -> bool {
-    std::env::var("BKSLASH_FOCUS_DIAGNOSTICS")
+    env_flag_enabled("BKSLASH_FOCUS_DIAGNOSTICS")
+}
+
+fn resize_diagnostics_enabled_flag() -> bool {
+    env_flag_enabled("BKSLASH_RESIZE_DIAGNOSTICS")
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -229,6 +237,56 @@ fn clamp_launcher_height(height: f64, frame: objc2_foundation::NSRect) -> f64 {
 }
 
 #[cfg(target_os = "macos")]
+fn format_rect(rect: objc2_foundation::NSRect) -> String {
+    format!(
+        "x={:.1} y={:.1} width={:.1} height={:.1} top={:.1}",
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+        rect.origin.y + rect.size.height
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn format_saved_launcher_anchor() -> String {
+    SAVED_LAUNCHER_ANCHOR
+        .lock()
+        .ok()
+        .and_then(|saved_anchor| *saved_anchor)
+        .map(|anchor| format!("x={:.1} top_y={:.1}", anchor.x, anchor.top_y))
+        .unwrap_or_else(|| "none".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn log_resize_snapshot(stage: &str) {
+    if !resize_diagnostics_enabled_flag() {
+        return;
+    }
+
+    let Some((panel, ns_view)) = macos_launcher_surface() else {
+        eprintln!("[bkslash:resize] stage={stage} skipped=no-panel");
+        return;
+    };
+
+    let panel_frame = panel.frame();
+    let view_frame = ns_view.frame();
+    let visible_frame = visible_frame_for_launcher_frame(panel_frame)
+        .map(format_rect)
+        .unwrap_or_else(|| "none".to_string());
+
+    eprintln!(
+        "[bkslash:resize] stage={stage} panel_visible={} panel_alpha={:.2} panel_frame=\"{}\" view_frame=\"{}\" visible_frame=\"{}\" saved_anchor=\"{}\"",
+        panel.isVisible(),
+        panel.alphaValue(),
+        format_rect(panel_frame),
+        format_rect(view_frame),
+        visible_frame,
+        format_saved_launcher_anchor(),
+    );
+}
+
+#[cfg(target_os = "macos")]
 fn launcher_frame_for_height(
     panel: &objc2_app_kit::NSPanel,
     height: f64,
@@ -270,9 +328,41 @@ fn resize_launcher_panel(height: f64, animated: bool) -> Result<(), String> {
         return Err("launcher panel was not initialized".to_string());
     };
 
+    let before_frame = panel.frame();
     let frame = launcher_frame_for_height(panel, height);
-    apply_launcher_frame(panel, ns_view, frame, animated && panel.isVisible());
+    let animated = animated && panel.isVisible();
+
+    if resize_diagnostics_enabled_flag() {
+        let clamped_height = frame.size.height;
+        let visible_frame = visible_frame_for_launcher_frame(before_frame)
+            .map(format_rect)
+            .unwrap_or_else(|| "none".to_string());
+        eprintln!(
+            "[bkslash:resize] stage=before-apply requested_height={height:.1} clamped_height={clamped_height:.1} animated={animated} before_frame=\"{}\" target_frame=\"{}\" visible_frame=\"{}\"",
+            format_rect(before_frame),
+            format_rect(frame),
+            visible_frame,
+        );
+    }
+
+    apply_launcher_frame(panel, ns_view, frame, animated);
+    log_resize_snapshot("after-apply");
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_delayed_resize_snapshot(window: &WebviewWindow) {
+    if !resize_diagnostics_enabled_flag() {
+        return;
+    }
+
+    let window = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        let _ = window.run_on_main_thread(|| {
+            log_resize_snapshot("after-delay-140ms");
+        });
+    });
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -778,16 +868,20 @@ fn set_launcher_height_command(
     height: f64,
     animated: bool,
 ) -> Result<(), String> {
+    let window = main_window(&app)?;
+
     #[cfg(target_os = "macos")]
     {
-        let _ = app;
-        resize_launcher_panel(height, animated)
+        let result = resize_launcher_panel(height, animated);
+        if result.is_ok() {
+            schedule_delayed_resize_snapshot(&window);
+        }
+        result
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         let _ = animated;
-        let window = main_window(&app)?;
         resize_launcher_window(&window, height)
     }
 }
@@ -911,6 +1005,18 @@ fn log_frontend_focus_diagnostic(stage: String, detail: serde_json::Value) {
     }
 }
 
+#[tauri::command]
+fn resize_diagnostics_enabled() -> bool {
+    resize_diagnostics_enabled_flag()
+}
+
+#[tauri::command]
+fn log_frontend_resize_diagnostic(stage: String, detail: serde_json::Value) {
+    if resize_diagnostics_enabled_flag() {
+        eprintln!("[bkslash:resize] stage={stage} frontend={detail}");
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -937,7 +1043,9 @@ pub fn run() {
             start_launcher_drag_command,
             paste_alias_command,
             focus_diagnostics_enabled,
-            log_frontend_focus_diagnostic
+            log_frontend_focus_diagnostic,
+            resize_diagnostics_enabled,
+            log_frontend_resize_diagnostic
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
