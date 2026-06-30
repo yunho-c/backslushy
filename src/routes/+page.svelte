@@ -322,6 +322,21 @@
 		}
 	}
 
+	function handleLauncherDragMouseDown(event: MouseEvent) {
+		if (event.button !== 0 || event.detail !== 1) return;
+		if (!(event.target instanceof Element)) return;
+		if (!(event.currentTarget instanceof Element)) return;
+
+		const blocker = event.target.closest(
+			'a, button, input, label, select, textarea, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="option"]'
+		);
+		if (blocker && event.currentTarget.contains(blocker)) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+		void invoke("start_launcher_drag_command");
+	}
+
 	function focusLauncherField() {
 		void tick().then(() => {
 			if (mode === "search") {
@@ -394,7 +409,12 @@
 		data-launcher-stage={launcherStage}
 		class="launcher-shell w-[720px] overflow-hidden rounded-lg border border-white/12 bg-zinc-950/92 text-zinc-50 shadow-2xl shadow-black/45 backdrop-blur-2xl"
 	>
-		<div class="flex h-14 items-center gap-3 px-4">
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div
+			data-tauri-drag-region="deep"
+			class="flex h-14 items-center gap-3 px-4"
+			onmousedown={handleLauncherDragMouseDown}
+		>
 			<div class="flex size-8 shrink-0 items-center justify-center rounded-md bg-cyan-300 text-zinc-950">
 				<Command class="size-4" aria-hidden="true" />
 			</div>
@@ -583,7 +603,12 @@
 
 		<Separator class="bg-white/10" />
 
-		<footer class="flex h-10 items-center justify-between px-4 text-[11px] text-zinc-500">
+		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+		<footer
+			data-tauri-drag-region="deep"
+			class="flex h-10 items-center justify-between px-4 text-[11px] text-zinc-500"
+			onmousedown={handleLauncherDragMouseDown}
+		>
 			<span>{status}</span>
 			<div class="flex items-center gap-2">
 				<Badge variant="outline" class="border-white/10 bg-white/[0.04] text-zinc-500">Enter paste</Badge>

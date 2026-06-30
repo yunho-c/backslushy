@@ -598,6 +598,53 @@ fn hide_launcher_command(app: AppHandle) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
+fn start_launcher_drag_command() -> Result<(), String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSEvent, NSEventType};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return Err("launcher drag must start on the main thread".to_string());
+    };
+
+    let Some((panel, _)) = macos_launcher_surface() else {
+        return Err("launcher panel was not initialized".to_string());
+    };
+
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(event) = app.currentEvent() else {
+        return Err("no current mouse event was available for launcher drag".to_string());
+    };
+
+    let drag_event = if event.r#type().0 == 0x15 {
+        NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            NSEventType::LeftMouseDown,
+            NSEvent::mouseLocation(),
+            event.modifierFlags(),
+            event.timestamp(),
+            event.windowNumber(),
+            None,
+            event.eventNumber(),
+            1,
+            1.0,
+        )
+        .unwrap_or(event)
+    } else {
+        event
+    };
+
+    panel.performWindowDragWithEvent(&drag_event);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn start_launcher_drag_command(app: AppHandle) -> Result<(), String> {
+    let window = main_window(&app)?;
+    window.start_dragging().map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
 fn paste_alias_command(
     app: AppHandle,
     expansion: String,
@@ -689,6 +736,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             hide_launcher_command,
+            start_launcher_drag_command,
             paste_alias_command,
             focus_diagnostics_enabled,
             log_frontend_focus_diagnostic
