@@ -2,6 +2,7 @@
 	import { onMount, tick } from "svelte";
 	import { invoke } from "@tauri-apps/api/core";
 	import { listen } from "@tauri-apps/api/event";
+	import { formatAliasExpansion } from "$lib/alias-preview.js";
 	import {
 		loadAliases,
 		makeAlias,
@@ -454,6 +455,7 @@
 			<div class="grid min-h-[230px] gap-1 px-2 py-2">
 				{#each results() as result, index}
 					{#if result.kind === "alias"}
+						{@const expansionPreview = formatAliasExpansion(result.alias.expansion)}
 						<div
 							role="button"
 							tabindex="-1"
@@ -480,8 +482,16 @@
 											<Badge class="bg-cyan-300 text-zinc-950">exact</Badge>
 										{/if}
 									</div>
-									<div class="min-w-0 flex-1 truncate text-right font-mono text-xs text-zinc-400">
-										{result.alias.expansion}
+									<div
+										class="min-w-0 flex-1 truncate text-right text-xs text-zinc-400 {expansionPreview.codeLike
+											? 'alias-expansion-code font-mono'
+											: ''}"
+									>
+										{#if expansionPreview.codeLike}
+											{@html expansionPreview.html}
+										{:else}
+											{result.alias.expansion}
+										{/if}
 									</div>
 								</div>
 								{#if result.alias.description}
@@ -628,6 +638,28 @@
 		transform: translateY(-2px) scale(0.992);
 		transition-duration: 100ms;
 		transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
+	}
+
+	.alias-expansion-code :global(.hljs-keyword),
+	.alias-expansion-code :global(.hljs-built_in),
+	.alias-expansion-code :global(.hljs-title) {
+		color: rgb(103 232 249);
+	}
+
+	.alias-expansion-code :global(.hljs-string),
+	.alias-expansion-code :global(.hljs-attr),
+	.alias-expansion-code :global(.hljs-variable),
+	.alias-expansion-code :global(.hljs-params) {
+		color: rgb(165 180 252);
+	}
+
+	.alias-expansion-code :global(.hljs-number),
+	.alias-expansion-code :global(.hljs-literal) {
+		color: rgb(253 186 116);
+	}
+
+	.alias-expansion-code :global(.hljs-comment) {
+		color: rgb(82 82 91);
 	}
 
 	@media (prefers-reduced-motion: reduce) {
