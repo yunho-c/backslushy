@@ -18,6 +18,13 @@ struct MacosLauncherSurface {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct LauncherPosition {
+    x: f64,
+    y: f64,
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 struct PasteboardSnapshot {
     items: Vec<PasteboardSnapshotItem>,
@@ -38,6 +45,10 @@ struct PasteboardSnapshotEntry {
 
 #[cfg(target_os = "macos")]
 static MACOS_LAUNCHER_SURFACE: std::sync::Mutex<Option<MacosLauncherSurface>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+static SAVED_LAUNCHER_POSITION: std::sync::Mutex<Option<LauncherPosition>> =
     std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
@@ -140,6 +151,95 @@ fn animate_launcher_alpha(
             });
         }
     });
+}
+
+#[cfg(target_os = "macos")]
+fn clamp_axis(value: f64, min: f64, max: f64) -> f64 {
+    if max < min {
+        min
+    } else {
+        value.clamp(min, max)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn position_inside_rect(position: LauncherPosition, rect: &objc2_foundation::NSRect) -> bool {
+    position.x >= rect.origin.x
+        && position.x <= rect.origin.x + rect.size.width
+        && position.y >= rect.origin.y
+        && position.y <= rect.origin.y + rect.size.height
+}
+
+#[cfg(target_os = "macos")]
+fn clamp_launcher_position(
+    position: LauncherPosition,
+    frame: objc2_foundation::NSRect,
+) -> LauncherPosition {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return position;
+    };
+
+    let window_center = LauncherPosition {
+        x: position.x + frame.size.width / 2.0,
+        y: position.y + frame.size.height / 2.0,
+    };
+    let screens = NSScreen::screens(mtm);
+
+    let visible_frame = (0..screens.count())
+        .map(|index| screens.objectAtIndex(index).visibleFrame())
+        .find(|visible_frame| position_inside_rect(window_center, visible_frame))
+        .or_else(|| NSScreen::mainScreen(mtm).map(|screen| screen.visibleFrame()));
+
+    let Some(visible_frame) = visible_frame else {
+        return position;
+    };
+
+    LauncherPosition {
+        x: clamp_axis(
+            position.x,
+            visible_frame.origin.x,
+            visible_frame.origin.x + visible_frame.size.width - frame.size.width,
+        ),
+        y: clamp_axis(
+            position.y,
+            visible_frame.origin.y,
+            visible_frame.origin.y + visible_frame.size.height - frame.size.height,
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn save_launcher_position(panel: &objc2_app_kit::NSPanel) {
+    let origin = panel.frame().origin;
+    if let Ok(mut saved_position) = SAVED_LAUNCHER_POSITION.lock() {
+        *saved_position = Some(LauncherPosition {
+            x: origin.x,
+            y: origin.y,
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn restore_launcher_position_or_center(panel: &objc2_app_kit::NSPanel) {
+    let saved_position = SAVED_LAUNCHER_POSITION
+        .lock()
+        .ok()
+        .and_then(|saved_position| *saved_position);
+
+    if let Some(saved_position) = saved_position {
+        let frame = panel.frame();
+        let position = clamp_launcher_position(saved_position, frame);
+        let mut origin = frame.origin;
+        origin.x = position.x;
+        origin.y = position.y;
+        panel.setFrameOrigin(origin);
+        return;
+    }
+
+    panel.center();
 }
 
 #[cfg(target_os = "macos")]
@@ -508,7 +608,7 @@ fn show_launcher(window: &WebviewWindow) {
 
     #[cfg(target_os = "macos")]
     if let Some((panel, _)) = macos_launcher_surface() {
-        panel.center();
+        restore_launcher_position_or_center(panel);
         panel.setAlphaValue(0.0);
     }
 
@@ -542,6 +642,7 @@ fn hide_launcher(window: &WebviewWindow) {
     let _ = window.emit("launcher-hiding", ());
 
     if let Some((panel, _)) = macos_launcher_surface() {
+        save_launcher_position(panel);
         let from_alpha = panel.alphaValue();
         animate_launcher_alpha(
             window,
@@ -633,6 +734,7 @@ fn start_launcher_drag_command() -> Result<(), String> {
     };
 
     panel.performWindowDragWithEvent(&drag_event);
+    save_launcher_position(panel);
     Ok(())
 }
 
