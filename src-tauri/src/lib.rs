@@ -24,6 +24,112 @@ fn macos_launcher_surface(
     })
 }
 
+fn focus_diagnostics_enabled_flag() -> bool {
+    std::env::var("BKSLASH_FOCUS_DIAGNOSTICS")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn objc_class_name<T: ?Sized>(object: &T) -> String {
+    let object = unsafe { &*(object as *const T as *const objc2::runtime::AnyObject) };
+    object.class().name().to_string_lossy().into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn object_addr<T: ?Sized>(object: &T) -> usize {
+    object as *const T as *const () as usize
+}
+
+#[cfg(target_os = "macos")]
+fn log_focus_snapshot(stage: &str) {
+    if !focus_diagnostics_enabled_flag() {
+        return;
+    }
+
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSRunningApplication, NSWorkspace};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        eprintln!("[bkslash:focus] stage={stage} skipped=not-main-thread");
+        return;
+    };
+
+    let app = NSApplication::sharedApplication(mtm);
+    let key_window = app.keyWindow();
+    let main_window = app.mainWindow();
+    let surface = macos_launcher_surface();
+    let panel_addr = surface
+        .map(|(panel, _)| object_addr(panel))
+        .unwrap_or_default();
+
+    let key_window_addr = key_window.as_deref().map(object_addr).unwrap_or_default();
+    let main_window_addr = main_window.as_deref().map(object_addr).unwrap_or_default();
+    let key_window_class = key_window
+        .as_deref()
+        .map(objc_class_name)
+        .unwrap_or_else(|| "none".to_string());
+    let main_window_class = main_window
+        .as_deref()
+        .map(objc_class_name)
+        .unwrap_or_else(|| "none".to_string());
+
+    let (
+        panel_visible,
+        panel_key,
+        panel_main,
+        panel_can_key,
+        panel_can_main,
+        panel_first_responder_class,
+    ) = surface
+        .map(|(panel, _)| {
+            (
+                panel.isVisible(),
+                panel.isKeyWindow(),
+                panel.isMainWindow(),
+                panel.canBecomeKeyWindow(),
+                panel.canBecomeMainWindow(),
+                panel
+                    .firstResponder()
+                    .as_deref()
+                    .map(objc_class_name)
+                    .unwrap_or_else(|| "none".to_string()),
+            )
+        })
+        .unwrap_or((false, false, false, false, false, "none".to_string()));
+
+    let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication();
+    let frontmost_name = frontmost
+        .as_deref()
+        .and_then(NSRunningApplication::localizedName)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let frontmost_bundle = frontmost
+        .as_deref()
+        .and_then(NSRunningApplication::bundleIdentifier)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string());
+
+    eprintln!(
+        "[bkslash:focus] stage={stage} app_active={} key_window_class={} key_window_is_panel={} key_window=0x{:x} main_window_class={} main_window_is_panel={} main_window=0x{:x} panel_visible={} panel_key={} panel_main={} panel_can_key={} panel_can_main={} panel_first_responder_class={} frontmost_name=\"{}\" frontmost_bundle=\"{}\"",
+        app.isActive(),
+        key_window_class,
+        key_window_addr != 0 && key_window_addr == panel_addr,
+        key_window_addr,
+        main_window_class,
+        main_window_addr != 0 && main_window_addr == panel_addr,
+        main_window_addr,
+        panel_visible,
+        panel_key,
+        panel_main,
+        panel_can_key,
+        panel_can_main,
+        panel_first_responder_class,
+        frontmost_name,
+        frontmost_bundle,
+    );
+}
+
 #[cfg(target_os = "macos")]
 fn launcher_panel_class() -> &'static objc2::runtime::AnyClass {
     use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
@@ -35,7 +141,7 @@ fn launcher_panel_class() -> &'static objc2::runtime::AnyClass {
     }
 
     extern "C" fn can_become_main_window(_this: &AnyObject, _sel: Sel) -> Bool {
-        Bool::YES
+        Bool::NO
     }
 
     static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
@@ -122,6 +228,8 @@ fn configure_macos_launcher_window(app: &tauri::App, window: &WebviewWindow) {
                 view: ns_view as *const NSView as usize,
             });
         }
+
+        log_focus_snapshot("after-panel-setup");
     }
 }
 
@@ -137,6 +245,7 @@ fn focus_launcher_window(_window: &WebviewWindow) {
 
         let _ = panel.makeFirstResponder(Some(AsRef::<NSResponder>::as_ref(ns_view)));
         panel.makeKeyAndOrderFront(None);
+        log_focus_snapshot("after-make-key");
     }
 }
 
@@ -146,6 +255,9 @@ fn focus_launcher_window(window: &WebviewWindow) {
 }
 
 fn show_launcher(window: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    log_focus_snapshot("before-show");
+
     #[cfg(target_os = "macos")]
     if let Some((panel, _)) = macos_launcher_surface() {
         panel.center();
@@ -166,9 +278,11 @@ fn show_launcher(window: &WebviewWindow) {
 
 #[cfg(target_os = "macos")]
 fn hide_launcher(_window: &WebviewWindow) {
+    log_focus_snapshot("before-hide");
     if let Some((panel, _)) = macos_launcher_surface() {
         panel.orderOut(None);
     }
+    log_focus_snapshot("after-hide");
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -202,9 +316,24 @@ fn toggle_launcher(app: &AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn hide_launcher_command(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    log_focus_snapshot("hide-command");
+
     let window = main_window(&app)?;
     hide_launcher(&window);
     Ok(())
+}
+
+#[tauri::command]
+fn focus_diagnostics_enabled() -> bool {
+    focus_diagnostics_enabled_flag()
+}
+
+#[tauri::command]
+fn log_frontend_focus_diagnostic(stage: String, detail: serde_json::Value) {
+    if focus_diagnostics_enabled_flag() {
+        eprintln!("[bkslash:focus] stage={stage} frontend={detail}");
+    }
 }
 
 pub fn run() {
@@ -226,7 +355,11 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![hide_launcher_command])
+        .invoke_handler(tauri::generate_handler![
+            hide_launcher_command,
+            focus_diagnostics_enabled,
+            log_frontend_focus_diagnostic
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

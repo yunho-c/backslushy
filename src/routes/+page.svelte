@@ -31,6 +31,7 @@
 	let selectedIndex = $state(0);
 	let status = $state("Ready");
 	let loaded = $state(false);
+	let focusDiagnosticsEnabled = $state(false);
 
 	let editingId = $state<string | null>(null);
 	let draftKey = $state("");
@@ -93,12 +94,48 @@
 		return 100;
 	}
 
+	function activeElementSummary() {
+		const activeElement = document.activeElement;
+		if (!(activeElement instanceof HTMLElement)) return "none";
+
+		const parts = [activeElement.tagName.toLowerCase()];
+		if (activeElement.id) parts.push(`#${activeElement.id}`);
+		if (activeElement.className && typeof activeElement.className === "string") {
+			parts.push(`.${activeElement.className.trim().split(/\s+/).slice(0, 3).join(".")}`);
+		}
+
+		const role = activeElement.getAttribute("role");
+		if (role) parts.push(`[role=${role}]`);
+		return parts.join("");
+	}
+
+	function logFocusDiagnostics(stage: string, detail: Record<string, unknown> = {}) {
+		if (!focusDiagnosticsEnabled) return;
+
+		const selected = selectedAlias();
+		const payload = {
+			stage,
+			mode,
+			queryLength: query.length,
+			selectedAliasKey: selected?.key ?? null,
+			documentHasFocus: document.hasFocus(),
+			activeElement: activeElementSummary(),
+			...detail,
+		};
+		console.info("[bkslash:focus]", payload);
+		void invoke("log_frontend_focus_diagnostic", { stage, detail: payload });
+	}
+
 	async function hideLauncher() {
+		logFocusDiagnostics("frontend-before-hide");
 		await invoke("hide_launcher_command");
+		logFocusDiagnostics("frontend-after-hide");
 	}
 
 	async function copyAlias(alias: AliasRecord) {
+		logFocusDiagnostics("frontend-before-copy", { aliasKey: alias.key });
 		await writeClipboard(alias.expansion);
+		logFocusDiagnostics("frontend-after-copy", { aliasKey: alias.key });
 		aliases = aliases.map((item) =>
 			item.id === alias.id
 				? { ...item, usageCount: item.usageCount + 1, updatedAt: new Date().toISOString() }
@@ -268,6 +305,7 @@
 			} else {
 				expansionRef?.focus();
 			}
+			logFocusDiagnostics("frontend-after-focus-field");
 		});
 	}
 
@@ -284,10 +322,17 @@
 	onMount(() => {
 		aliases = loadAliases();
 		loaded = true;
+		void invoke<boolean>("focus_diagnostics_enabled").then((enabled) => {
+			focusDiagnosticsEnabled = enabled;
+			logFocusDiagnostics("frontend-diagnostics-ready");
+		});
 		focusLauncherField();
 
 		let unlisten: (() => void) | undefined;
-		void listen("launcher-shown", focusLauncherField).then((cleanup) => {
+		void listen("launcher-shown", () => {
+			logFocusDiagnostics("frontend-launcher-shown");
+			focusLauncherField();
+		}).then((cleanup) => {
 			unlisten = cleanup;
 		});
 

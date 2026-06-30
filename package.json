@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "desktop:dev": "tauri dev",
+    "desktop:dev:focus": "BKSLASH_FOCUS_DIAGNOSTICS=1 tauri dev",
     "desktop:build": "tauri build",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",

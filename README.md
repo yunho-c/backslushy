@@ -21,6 +21,16 @@ bun install
 bun run desktop:dev
 ```
 
+To capture macOS focus diagnostics while debugging launcher activation and paste
+restore behavior:
+
+```sh
+bun run desktop:dev:focus
+```
+
+Diagnostic events are written to the dev terminal with the `[bkslash:focus]`
+prefix from both the native AppKit layer and the frontend.
+
 ## Checks
 
 ```sh
