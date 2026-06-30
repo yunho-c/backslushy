@@ -15,7 +15,7 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Separator } from "$lib/components/ui/separator/index.js";
-	import { Check, Clipboard, Command, Plus, Search, Terminal, X } from "@lucide/svelte";
+	import { Check, Clipboard, Plus, Search, X } from "@lucide/svelte";
 
 	type Mode = "search" | "create" | "edit";
 	type LauncherStage = "hidden" | "showing" | "shown" | "hiding";
@@ -415,9 +415,6 @@
 			class="flex h-14 items-center gap-3 px-4"
 			onmousedown={handleLauncherDragMouseDown}
 		>
-			<div class="flex size-8 shrink-0 items-center justify-center rounded-md bg-cyan-300 text-zinc-950">
-				<Command class="size-4" aria-hidden="true" />
-			</div>
 			<div class="relative min-w-0 flex-1">
 				<Search
 					class="pointer-events-none absolute left-0 top-1/2 size-4 -translate-y-1/2 text-zinc-500"
@@ -460,7 +457,7 @@
 						<div
 							role="button"
 							tabindex="-1"
-							class="group grid h-[72px] grid-cols-[44px_1fr_auto] items-center gap-3 rounded-md px-3 text-left transition-colors hover:bg-white/8 focus-visible:bg-white/10 focus-visible:outline-none {index ===
+							class="group grid h-[72px] grid-cols-[1fr_auto] items-center gap-3 rounded-md px-3 text-left transition-colors hover:bg-white/8 focus-visible:bg-white/10 focus-visible:outline-none {index ===
 							selectedIndex
 								? 'bg-white/10'
 								: ''}"
@@ -473,11 +470,6 @@
 								}
 							}}
 						>
-							<div
-								class="flex size-10 items-center justify-center rounded-md border border-white/10 bg-white/[0.06] text-cyan-200"
-							>
-								<Terminal class="size-4" aria-hidden="true" />
-							</div>
 							<div class="min-w-0">
 								<div class="flex items-center gap-2">
 									<span class="font-mono text-base font-semibold tracking-normal text-zinc-100">
@@ -486,9 +478,6 @@
 									{#if result.exact}
 										<Badge class="bg-cyan-300 text-zinc-950">exact</Badge>
 									{/if}
-									<Badge variant="outline" class="border-white/10 bg-white/[0.04] text-zinc-400">
-										{result.alias.kind}
-									</Badge>
 								</div>
 								<div class="truncate font-mono text-xs text-zinc-400">{result.alias.expansion}</div>
 								{#if result.alias.description}
@@ -496,9 +485,6 @@
 								{/if}
 							</div>
 							<div class="flex items-center gap-2">
-								<Badge variant="outline" class="border-white/10 bg-white/[0.04] text-zinc-400">
-									{result.alias.usageCount}
-								</Badge>
 								<Button
 									variant="ghost"
 									size="icon"
@@ -516,18 +502,13 @@
 					{:else}
 						<button
 							type="button"
-							class="group grid h-[72px] grid-cols-[44px_1fr_auto] items-center gap-3 rounded-md px-3 text-left transition-colors hover:bg-white/8 focus-visible:bg-white/10 focus-visible:outline-none {index ===
+							class="group grid h-[72px] grid-cols-[1fr_auto] items-center gap-3 rounded-md px-3 text-left transition-colors hover:bg-white/8 focus-visible:bg-white/10 focus-visible:outline-none {index ===
 							selectedIndex
 								? 'bg-white/10'
 								: ''}"
 							onmouseenter={() => (selectedIndex = index)}
 							onclick={() => beginCreate(result.key, result.expansion)}
 						>
-							<div
-								class="flex size-10 items-center justify-center rounded-md border border-cyan-300/30 bg-cyan-300/10 text-cyan-200"
-							>
-								<Plus class="size-4" aria-hidden="true" />
-							</div>
 							<div class="min-w-0">
 								<div class="font-mono text-base font-semibold tracking-normal text-zinc-100">
 									{result.key || "new-alias"}
