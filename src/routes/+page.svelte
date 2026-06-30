@@ -15,7 +15,7 @@
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import { Separator } from "$lib/components/ui/separator/index.js";
-	import { Check, Clipboard, Plus, Search, X } from "@lucide/svelte";
+	import { Check, Copy, Plus, Search, X } from "@lucide/svelte";
 
 	type Mode = "search" | "create" | "edit";
 	type LauncherStage = "hidden" | "showing" | "shown" | "hiding";
@@ -495,7 +495,7 @@
 										void copyAlias(result.alias);
 									}}
 								>
-									<Clipboard class="size-4" aria-hidden="true" />
+									<Copy class="size-4" aria-hidden="true" />
 								</Button>
 							</div>
 						</div>
