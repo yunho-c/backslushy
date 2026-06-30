@@ -457,7 +457,7 @@
 						<div
 							role="button"
 							tabindex="-1"
-							class="group grid h-[72px] grid-cols-[1fr_auto] items-center gap-3 rounded-md px-3 text-left transition-colors hover:bg-white/8 focus-visible:bg-white/10 focus-visible:outline-none {index ===
+							class="group grid min-h-12 grid-cols-[1fr_auto] items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-white/8 focus-visible:bg-white/10 focus-visible:outline-none {index ===
 							selectedIndex
 								? 'bg-white/10'
 								: ''}"
@@ -506,7 +506,7 @@
 					{:else}
 						<button
 							type="button"
-							class="group grid h-[72px] grid-cols-[1fr_auto] items-center gap-3 rounded-md px-3 text-left transition-colors hover:bg-white/8 focus-visible:bg-white/10 focus-visible:outline-none {index ===
+							class="group grid min-h-12 grid-cols-[1fr_auto] items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-white/8 focus-visible:bg-white/10 focus-visible:outline-none {index ===
 							selectedIndex
 								? 'bg-white/10'
 								: ''}"
