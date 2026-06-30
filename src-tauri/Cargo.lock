@@ -259,8 +259,10 @@ dependencies = [
 name = "bkslash"
 version = "0.1.0"
 dependencies = [
+ "core-graphics",
  "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "tauri",

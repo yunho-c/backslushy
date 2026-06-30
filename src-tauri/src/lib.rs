@@ -9,6 +9,25 @@ struct MacosLauncherSurface {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct PasteboardSnapshot {
+    items: Vec<PasteboardSnapshotItem>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct PasteboardSnapshotItem {
+    entries: Vec<PasteboardSnapshotEntry>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct PasteboardSnapshotEntry {
+    type_name: String,
+    data: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
 static MACOS_LAUNCHER_SURFACE: std::sync::Mutex<Option<MacosLauncherSurface>> =
     std::sync::Mutex::new(None);
 
@@ -28,6 +47,17 @@ fn focus_diagnostics_enabled_flag() -> bool {
     std::env::var("BKSLASH_FOCUS_DIAGNOSTICS")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> std::ffi::c_uchar;
+}
+
+#[cfg(target_os = "macos")]
+fn accessibility_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() != 0 }
 }
 
 #[cfg(target_os = "macos")]
@@ -128,6 +158,134 @@ fn log_focus_snapshot(stage: &str) {
         frontmost_name,
         frontmost_bundle,
     );
+}
+
+#[cfg(target_os = "macos")]
+fn snapshot_general_pasteboard() -> PasteboardSnapshot {
+    use objc2_foundation::NSData;
+    use objc2_app_kit::NSPasteboard;
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let mut snapshot = PasteboardSnapshot { items: Vec::new() };
+
+    let Some(items) = pasteboard.pasteboardItems() else {
+        return snapshot;
+    };
+
+    for item_index in 0..items.count() {
+        let item = items.objectAtIndex(item_index);
+        let types = item.types();
+        let mut snapshot_item = PasteboardSnapshotItem { entries: Vec::new() };
+
+        for type_index in 0..types.count() {
+            let item_type = types.objectAtIndex(type_index);
+            if let Some(data) = item.dataForType(&item_type) {
+                snapshot_item.entries.push(PasteboardSnapshotEntry {
+                    type_name: item_type.to_string(),
+                    data: NSData::to_vec(&data),
+                });
+            }
+        }
+
+        if !snapshot_item.entries.is_empty() {
+            snapshot.items.push(snapshot_item);
+        }
+    }
+
+    snapshot
+}
+
+#[cfg(target_os = "macos")]
+fn write_string_to_general_pasteboard(value: &str) -> Result<(), String> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    use objc2_foundation::NSString;
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+
+    let value = NSString::from_str(value);
+    if pasteboard.setString_forType(&value, unsafe { NSPasteboardTypeString }) {
+        Ok(())
+    } else {
+        Err("failed to write alias expansion to the system pasteboard".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn restore_general_pasteboard_if_unchanged(snapshot: PasteboardSnapshot, expected: &str) {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{
+        NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSPasteboardWriting,
+    };
+    use objc2_foundation::{NSArray, NSData, NSString};
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let current_string = pasteboard
+        .stringForType(unsafe { NSPasteboardTypeString })
+        .map(|value| value.to_string());
+
+    if current_string.as_deref() != Some(expected) {
+        if focus_diagnostics_enabled_flag() {
+            eprintln!(
+                "[bkslash:focus] stage=clipboard-restore skipped=clipboard-changed current_string={:?}",
+                current_string
+            );
+        }
+        return;
+    }
+
+    if snapshot.items.is_empty() {
+        pasteboard.clearContents();
+        return;
+    }
+
+    let restored_items = snapshot
+        .items
+        .into_iter()
+        .filter_map(|snapshot_item| {
+            let pasteboard_item = NSPasteboardItem::new();
+            let mut wrote_entry = false;
+
+            for entry in snapshot_item.entries {
+                let item_type = NSString::from_str(&entry.type_name);
+                let data = NSData::with_bytes(&entry.data);
+                wrote_entry |= pasteboard_item.setData_forType(&data, &item_type);
+            }
+
+            wrote_entry.then(|| ProtocolObject::from_retained(pasteboard_item))
+        })
+        .collect::<Vec<_>>();
+
+    if restored_items.is_empty() {
+        pasteboard.clearContents();
+        return;
+    }
+
+    let restored_items = NSArray::<ProtocolObject<dyn NSPasteboardWriting>>::from_retained_slice(
+        &restored_items,
+    );
+    pasteboard.clearContents();
+    pasteboard.writeObjects(&restored_items);
+}
+
+#[cfg(target_os = "macos")]
+fn post_command_v() -> Result<(), String> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, KeyCode};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|_| "failed to create a CoreGraphics event source".to_string())?;
+    let command_flag = CGEventFlags::from_bits_retain(CGEventFlags::CGEventFlagCommand.bits() | 0x8);
+    let key_down = CGEvent::new_keyboard_event(source.clone(), KeyCode::ANSI_V, true)
+        .map_err(|_| "failed to create Cmd+V key-down event".to_string())?;
+    let key_up = CGEvent::new_keyboard_event(source, KeyCode::ANSI_V, false)
+        .map_err(|_| "failed to create Cmd+V key-up event".to_string())?;
+
+    key_down.set_flags(command_flag);
+    key_up.set_flags(command_flag);
+    key_down.post(CGEventTapLocation::AnnotatedSession);
+    key_up.post(CGEventTapLocation::AnnotatedSession);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -324,6 +482,65 @@ fn hide_launcher_command(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn paste_alias_command(
+    app: AppHandle,
+    expansion: String,
+    restore_clipboard: bool,
+) -> Result<(), String> {
+    if !accessibility_trusted() {
+        return Err(
+            "bkslash needs macOS Accessibility permission before it can paste into other apps"
+                .to_string(),
+        );
+    }
+
+    let snapshot = restore_clipboard.then(snapshot_general_pasteboard);
+    write_string_to_general_pasteboard(&expansion)?;
+
+    let window = main_window(&app)?;
+    hide_launcher(&window);
+
+    if focus_diagnostics_enabled_flag() {
+        eprintln!(
+            "[bkslash:focus] stage=paste-dispatch scheduled=true restore_clipboard={restore_clipboard}"
+        );
+    }
+
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(90));
+
+        if let Err(error) = post_command_v() {
+            eprintln!("[bkslash:focus] stage=paste-dispatch error=\"{error}\"");
+        } else if focus_diagnostics_enabled_flag() {
+            eprintln!("[bkslash:focus] stage=paste-dispatch posted=true");
+        }
+
+        if let Some(snapshot) = snapshot {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            restore_general_pasteboard_if_unchanged(snapshot, &expansion);
+            if focus_diagnostics_enabled_flag() {
+                eprintln!("[bkslash:focus] stage=clipboard-restore completed=true");
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn paste_alias_command(
+    app: AppHandle,
+    _expansion: String,
+    _restore_clipboard: bool,
+) -> Result<(), String> {
+    let window = main_window(&app)?;
+    hide_launcher(&window);
+    Err("paste injection is currently implemented only on macOS".to_string())
+}
+
 #[tauri::command]
 fn focus_diagnostics_enabled() -> bool {
     focus_diagnostics_enabled_flag()
@@ -357,6 +574,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             hide_launcher_command,
+            paste_alias_command,
             focus_diagnostics_enabled,
             log_frontend_focus_diagnostic
         ])

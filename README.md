@@ -6,7 +6,9 @@ The app starts with its main window hidden. Press the backslash key (`\`) to tog
 
 ## Alias Workflow
 
-Type an alias such as `gsuir` to reveal its expansion, then press `Enter` to copy it. Unknown aliases can be created in place with `Cmd+N` or the `+` button. Select an existing alias and press `Tab` to edit it.
+Type an alias such as `gsuir` to reveal its expansion, then press `Enter` to paste it into the previously focused app. Unknown aliases can be created in place with `Cmd+N` or the `+` button. Select an existing alias and press `Tab` to edit it.
+
+On macOS, paste injection uses the system pasteboard plus a synthetic `Cmd+V` event. Clipboard contents are restored by default after the paste dispatch. macOS Accessibility permission is required for the paste event; the inline copy button still works without it.
 
 Aliases are stored locally in browser storage for now. The default set includes:
 

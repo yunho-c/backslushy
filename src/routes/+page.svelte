@@ -136,13 +136,34 @@
 		logFocusDiagnostics("frontend-before-copy", { aliasKey: alias.key });
 		await writeClipboard(alias.expansion);
 		logFocusDiagnostics("frontend-after-copy", { aliasKey: alias.key });
+		recordAliasUse(alias);
+		status = `Copied ${alias.key}`;
+		window.setTimeout(() => void hideLauncher(), 120);
+	}
+
+	async function pasteAlias(alias: AliasRecord) {
+		logFocusDiagnostics("frontend-before-paste", { aliasKey: alias.key });
+		try {
+			await invoke("paste_alias_command", {
+				expansion: alias.expansion,
+				restoreClipboard: true,
+			});
+			logFocusDiagnostics("frontend-after-paste", { aliasKey: alias.key });
+			recordAliasUse(alias);
+			status = `Pasted ${alias.key}`;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			status = message;
+			logFocusDiagnostics("frontend-paste-error", { aliasKey: alias.key, message });
+		}
+	}
+
+	function recordAliasUse(alias: AliasRecord) {
 		aliases = aliases.map((item) =>
 			item.id === alias.id
 				? { ...item, usageCount: item.usageCount + 1, updatedAt: new Date().toISOString() }
 				: item
 		);
-		status = `Copied ${alias.key}`;
-		window.setTimeout(() => void hideLauncher(), 120);
 	}
 
 	async function writeClipboard(value: string) {
@@ -170,7 +191,7 @@
 			return;
 		}
 
-		void copyAlias(result.alias);
+		void pasteAlias(result.alias);
 	}
 
 	function beginCreate(seedKey = query, seedExpansion = "") {
@@ -390,14 +411,21 @@
 			<div class="grid min-h-[230px] gap-1 px-2 py-2">
 				{#each results() as result, index}
 					{#if result.kind === "alias"}
-						<button
-							type="button"
+						<div
+							role="button"
+							tabindex="-1"
 							class="group grid h-[72px] grid-cols-[44px_1fr_auto] items-center gap-3 rounded-md px-3 text-left transition-colors hover:bg-white/8 focus-visible:bg-white/10 focus-visible:outline-none {index ===
 							selectedIndex
 								? 'bg-white/10'
 								: ''}"
 							onmouseenter={() => (selectedIndex = index)}
-							onclick={() => copyAlias(result.alias)}
+							onclick={() => pasteAlias(result.alias)}
+							onkeydown={(event) => {
+								if (event.key === "Enter" || event.key === " ") {
+									event.preventDefault();
+									void pasteAlias(result.alias);
+								}
+							}}
 						>
 							<div
 								class="flex size-10 items-center justify-center rounded-md border border-white/10 bg-white/[0.06] text-cyan-200"
@@ -425,12 +453,20 @@
 								<Badge variant="outline" class="border-white/10 bg-white/[0.04] text-zinc-400">
 									{result.alias.usageCount}
 								</Badge>
-								<Clipboard
-									class="size-4 text-zinc-600 transition-colors group-hover:text-cyan-200"
-									aria-hidden="true"
-								/>
+								<Button
+									variant="ghost"
+									size="icon"
+									class="size-8 text-zinc-600 hover:bg-white/8 hover:text-cyan-200"
+									aria-label={`Copy ${result.alias.key}`}
+									onclick={(event) => {
+										event.stopPropagation();
+										void copyAlias(result.alias);
+									}}
+								>
+									<Clipboard class="size-4" aria-hidden="true" />
+								</Button>
 							</div>
-						</button>
+						</div>
 					{:else}
 						<button
 							type="button"
@@ -524,7 +560,7 @@
 		<footer class="flex h-10 items-center justify-between px-4 text-[11px] text-zinc-500">
 			<span>{status}</span>
 			<div class="flex items-center gap-2">
-				<Badge variant="outline" class="border-white/10 bg-white/[0.04] text-zinc-500">Enter copy</Badge>
+				<Badge variant="outline" class="border-white/10 bg-white/[0.04] text-zinc-500">Enter paste</Badge>
 				<Badge variant="outline" class="border-white/10 bg-white/[0.04] text-zinc-500">Tab edit</Badge>
 				<Badge variant="outline" class="border-white/10 bg-white/[0.04] text-zinc-500">
 					⌘N create
