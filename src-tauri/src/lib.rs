@@ -10,6 +10,8 @@ const LAUNCHER_ANIMATION_FRAME_MS: u64 = 16;
 #[cfg(target_os = "macos")]
 const PASTE_DISPATCH_DELAY_MS: u64 = LAUNCHER_CLOSE_ANIMATION_MS + 55;
 #[cfg(target_os = "macos")]
+const LAUNCHER_RESIZE_ANIMATION_MS: u64 = 90;
+#[cfg(target_os = "macos")]
 const LAUNCHER_MIN_HEIGHT: f64 = 220.0;
 #[cfg(target_os = "macos")]
 const LAUNCHER_MAX_HEIGHT: f64 = 560.0;
@@ -62,6 +64,10 @@ static LAUNCHER_ANIMATION_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
+static LAUNCHER_RESIZE_ANIMATION_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_os = "macos")]
 fn macos_launcher_surface() -> Option<(
     &'static objc2_app_kit::NSPanel,
     &'static objc2_app_kit::NSView,
@@ -108,6 +114,18 @@ fn next_launcher_animation_generation() -> u64 {
 #[cfg(target_os = "macos")]
 fn launcher_animation_generation() -> u64 {
     LAUNCHER_ANIMATION_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(target_os = "macos")]
+fn next_launcher_resize_animation_generation() -> u64 {
+    LAUNCHER_RESIZE_ANIMATION_GENERATION
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1
+}
+
+#[cfg(target_os = "macos")]
+fn launcher_resize_animation_generation() -> u64 {
+    LAUNCHER_RESIZE_ANIMATION_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(target_os = "macos")]
@@ -304,7 +322,6 @@ fn apply_launcher_frame(
     panel: &objc2_app_kit::NSPanel,
     ns_view: &objc2_app_kit::NSView,
     frame: objc2_foundation::NSRect,
-    animated: bool,
 ) {
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
@@ -313,11 +330,74 @@ fn apply_launcher_frame(
         NSSize::new(frame.size.width, frame.size.height),
     );
     ns_view.setFrame(view_frame);
-    panel.setFrame_display_animate(frame, true, animated);
+    panel.setFrame_display(frame, true);
 }
 
 #[cfg(target_os = "macos")]
-fn resize_launcher_panel(height: f64, animated: bool) -> Result<(), String> {
+fn interpolated_rect(
+    from: objc2_foundation::NSRect,
+    to: objc2_foundation::NSRect,
+    progress: f64,
+) -> objc2_foundation::NSRect {
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let interpolate = |start: f64, end: f64| start + (end - start) * progress;
+    NSRect::new(
+        NSPoint::new(
+            interpolate(from.origin.x, to.origin.x),
+            interpolate(from.origin.y, to.origin.y),
+        ),
+        NSSize::new(
+            interpolate(from.size.width, to.size.width),
+            interpolate(from.size.height, to.size.height),
+        ),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn animate_launcher_frame(
+    window: &WebviewWindow,
+    generation: u64,
+    from_frame: objc2_foundation::NSRect,
+    to_frame: objc2_foundation::NSRect,
+) {
+    let window = window.clone();
+
+    std::thread::spawn(move || {
+        let frame_count = (LAUNCHER_RESIZE_ANIMATION_MS / LAUNCHER_ANIMATION_FRAME_MS).max(1);
+
+        for frame_index in 1..=frame_count {
+            std::thread::sleep(std::time::Duration::from_millis(
+                LAUNCHER_RESIZE_ANIMATION_MS / frame_count,
+            ));
+
+            let progress = frame_index as f64 / frame_count as f64;
+            let eased = ease_out_cubic(progress);
+            let current_frame = interpolated_rect(from_frame, to_frame, eased);
+            let window = window.clone();
+
+            let _ = window.run_on_main_thread(move || {
+                if launcher_resize_animation_generation() != generation {
+                    return;
+                }
+
+                if let Some((panel, ns_view)) = macos_launcher_surface() {
+                    apply_launcher_frame(panel, ns_view, current_frame);
+                    if resize_diagnostics_enabled_flag() {
+                        eprintln!(
+                            "[bkslash:resize] stage=animation-frame frame_index={frame_index} frame_count={frame_count} progress={progress:.2} eased={eased:.2} current_frame=\"{}\" target_frame=\"{}\"",
+                            format_rect(current_frame),
+                            format_rect(to_frame),
+                        );
+                    }
+                }
+            });
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn resize_launcher_panel(window: &WebviewWindow, height: f64, animated: bool) -> Result<(), String> {
     use objc2::MainThreadMarker;
 
     if MainThreadMarker::new().is_none() {
@@ -331,6 +411,7 @@ fn resize_launcher_panel(height: f64, animated: bool) -> Result<(), String> {
     let before_frame = panel.frame();
     let frame = launcher_frame_for_height(panel, height);
     let animated = animated && panel.isVisible();
+    let generation = next_launcher_resize_animation_generation();
 
     if resize_diagnostics_enabled_flag() {
         let clamped_height = frame.size.height;
@@ -345,8 +426,14 @@ fn resize_launcher_panel(height: f64, animated: bool) -> Result<(), String> {
         );
     }
 
-    apply_launcher_frame(panel, ns_view, frame, animated);
-    log_resize_snapshot("after-apply");
+    if animated {
+        animate_launcher_frame(window, generation, before_frame, frame);
+        log_resize_snapshot("after-animation-start");
+    } else {
+        apply_launcher_frame(panel, ns_view, frame);
+        log_resize_snapshot("after-apply");
+    }
+
     Ok(())
 }
 
@@ -872,7 +959,7 @@ fn set_launcher_height_command(
 
     #[cfg(target_os = "macos")]
     {
-        let result = resize_launcher_panel(height, animated);
+        let result = resize_launcher_panel(&window, height, animated);
         if result.is_ok() {
             schedule_delayed_resize_snapshot(&window);
         }
