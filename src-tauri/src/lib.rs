@@ -2,6 +2,15 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[cfg(target_os = "macos")]
+const LAUNCHER_OPEN_ANIMATION_MS: u64 = 60;
+#[cfg(target_os = "macos")]
+const LAUNCHER_CLOSE_ANIMATION_MS: u64 = 110;
+#[cfg(target_os = "macos")]
+const LAUNCHER_ANIMATION_FRAME_MS: u64 = 16;
+#[cfg(target_os = "macos")]
+const PASTE_DISPATCH_DELAY_MS: u64 = LAUNCHER_CLOSE_ANIMATION_MS + 55;
+
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 struct MacosLauncherSurface {
     panel: usize,
@@ -32,8 +41,14 @@ static MACOS_LAUNCHER_SURFACE: std::sync::Mutex<Option<MacosLauncherSurface>> =
     std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
-fn macos_launcher_surface(
-) -> Option<(&'static objc2_app_kit::NSPanel, &'static objc2_app_kit::NSView)> {
+static LAUNCHER_ANIMATION_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_os = "macos")]
+fn macos_launcher_surface() -> Option<(
+    &'static objc2_app_kit::NSPanel,
+    &'static objc2_app_kit::NSView,
+)> {
     let surface = *MACOS_LAUNCHER_SURFACE.lock().ok()?;
     surface.map(|surface| unsafe {
         (
@@ -58,6 +73,73 @@ extern "C" {
 #[cfg(target_os = "macos")]
 fn accessibility_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn next_launcher_animation_generation() -> u64 {
+    LAUNCHER_ANIMATION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+#[cfg(target_os = "macos")]
+fn launcher_animation_generation() -> u64 {
+    LAUNCHER_ANIMATION_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(target_os = "macos")]
+fn ease_out_cubic(progress: f64) -> f64 {
+    1.0 - (1.0 - progress).powi(3)
+}
+
+#[cfg(target_os = "macos")]
+fn animate_launcher_alpha(
+    window: &WebviewWindow,
+    generation: u64,
+    from_alpha: f64,
+    to_alpha: f64,
+    duration_ms: u64,
+    order_out_on_complete: bool,
+) {
+    let window = window.clone();
+
+    std::thread::spawn(move || {
+        let frame_count = (duration_ms / LAUNCHER_ANIMATION_FRAME_MS).max(1);
+
+        for frame in 1..=frame_count {
+            std::thread::sleep(std::time::Duration::from_millis(duration_ms / frame_count));
+
+            let progress = frame as f64 / frame_count as f64;
+            let eased = ease_out_cubic(progress);
+            let alpha = from_alpha + (to_alpha - from_alpha) * eased;
+            let window = window.clone();
+
+            let _ = window.run_on_main_thread(move || {
+                if launcher_animation_generation() != generation {
+                    return;
+                }
+
+                if let Some((panel, _)) = macos_launcher_surface() {
+                    panel.setAlphaValue(alpha);
+                }
+            });
+        }
+
+        if order_out_on_complete {
+            let completion_window = window.clone();
+            let _ = window.run_on_main_thread(move || {
+                if launcher_animation_generation() != generation {
+                    return;
+                }
+
+                log_focus_snapshot("before-order-out");
+                if let Some((panel, _)) = macos_launcher_surface() {
+                    panel.orderOut(None);
+                    panel.setAlphaValue(0.0);
+                }
+                log_focus_snapshot("after-hide");
+                let _ = completion_window.emit("launcher-hidden", ());
+            });
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -162,8 +244,8 @@ fn log_focus_snapshot(stage: &str) {
 
 #[cfg(target_os = "macos")]
 fn snapshot_general_pasteboard() -> PasteboardSnapshot {
-    use objc2_foundation::NSData;
     use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::NSData;
 
     let pasteboard = NSPasteboard::generalPasteboard();
     let mut snapshot = PasteboardSnapshot { items: Vec::new() };
@@ -175,7 +257,9 @@ fn snapshot_general_pasteboard() -> PasteboardSnapshot {
     for item_index in 0..items.count() {
         let item = items.objectAtIndex(item_index);
         let types = item.types();
-        let mut snapshot_item = PasteboardSnapshotItem { entries: Vec::new() };
+        let mut snapshot_item = PasteboardSnapshotItem {
+            entries: Vec::new(),
+        };
 
         for type_index in 0..types.count() {
             let item_type = types.objectAtIndex(type_index);
@@ -261,9 +345,8 @@ fn restore_general_pasteboard_if_unchanged(snapshot: PasteboardSnapshot, expecte
         return;
     }
 
-    let restored_items = NSArray::<ProtocolObject<dyn NSPasteboardWriting>>::from_retained_slice(
-        &restored_items,
-    );
+    let restored_items =
+        NSArray::<ProtocolObject<dyn NSPasteboardWriting>>::from_retained_slice(&restored_items);
     pasteboard.clearContents();
     pasteboard.writeObjects(&restored_items);
 }
@@ -275,7 +358,8 @@ fn post_command_v() -> Result<(), String> {
 
     let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
         .map_err(|_| "failed to create a CoreGraphics event source".to_string())?;
-    let command_flag = CGEventFlags::from_bits_retain(CGEventFlags::CGEventFlagCommand.bits() | 0x8);
+    let command_flag =
+        CGEventFlags::from_bits_retain(CGEventFlags::CGEventFlagCommand.bits() | 0x8);
     let key_down = CGEvent::new_keyboard_event(source.clone(), KeyCode::ANSI_V, true)
         .map_err(|_| "failed to create Cmd+V key-down event".to_string())?;
     let key_up = CGEvent::new_keyboard_event(source, KeyCode::ANSI_V, false)
@@ -329,8 +413,8 @@ fn configure_macos_launcher_window(app: &tauri::App, window: &WebviewWindow) {
     if let (Ok(ns_window), Ok(ns_view)) = (window.ns_window(), window.ns_view()) {
         use objc2::{msg_send, rc::Retained, MainThreadMarker};
         use objc2_app_kit::{
-            NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSPanel, NSResponder,
-            NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+            NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSPanel, NSResponder, NSView,
+            NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
         };
 
         let Some(_mtm) = MainThreadMarker::new() else {
@@ -341,8 +425,7 @@ fn configure_macos_launcher_window(app: &tauri::App, window: &WebviewWindow) {
         let frame = ns_window.frame();
 
         let panel = unsafe {
-            let allocated: objc2::rc::Allocated<NSPanel> =
-                msg_send![launcher_panel_class(), alloc];
+            let allocated: objc2::rc::Allocated<NSPanel> = msg_send![launcher_panel_class(), alloc];
             NSPanel::initWithContentRect_styleMask_backing_defer(
                 allocated,
                 frame,
@@ -360,6 +443,7 @@ fn configure_macos_launcher_window(app: &tauri::App, window: &WebviewWindow) {
         panel.setCanHide(false);
         panel.setHasShadow(true);
         panel.setOpaque(false);
+        panel.setAlphaValue(0.0);
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces
@@ -417,8 +501,15 @@ fn show_launcher(window: &WebviewWindow) {
     log_focus_snapshot("before-show");
 
     #[cfg(target_os = "macos")]
+    let animation_generation = next_launcher_animation_generation();
+
+    #[cfg(target_os = "macos")]
+    let _ = window.emit("launcher-showing", ());
+
+    #[cfg(target_os = "macos")]
     if let Some((panel, _)) = macos_launcher_surface() {
         panel.center();
+        panel.setAlphaValue(0.0);
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -432,15 +523,38 @@ fn show_launcher(window: &WebviewWindow) {
 
     focus_launcher_window(window);
     let _ = window.emit("launcher-shown", ());
+
+    #[cfg(target_os = "macos")]
+    animate_launcher_alpha(
+        window,
+        animation_generation,
+        0.0,
+        1.0,
+        LAUNCHER_OPEN_ANIMATION_MS,
+        false,
+    );
 }
 
 #[cfg(target_os = "macos")]
-fn hide_launcher(_window: &WebviewWindow) {
+fn hide_launcher(window: &WebviewWindow) {
+    let animation_generation = next_launcher_animation_generation();
     log_focus_snapshot("before-hide");
+    let _ = window.emit("launcher-hiding", ());
+
     if let Some((panel, _)) = macos_launcher_surface() {
-        panel.orderOut(None);
+        let from_alpha = panel.alphaValue();
+        animate_launcher_alpha(
+            window,
+            animation_generation,
+            from_alpha,
+            0.0,
+            LAUNCHER_CLOSE_ANIMATION_MS,
+            true,
+        );
+    } else {
+        log_focus_snapshot("after-hide");
+        let _ = window.emit("launcher-hidden", ());
     }
-    log_focus_snapshot("after-hide");
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -509,7 +623,7 @@ fn paste_alias_command(
     }
 
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(90));
+        std::thread::sleep(std::time::Duration::from_millis(PASTE_DISPATCH_DELAY_MS));
 
         if let Err(error) = post_command_v() {
             eprintln!("[bkslash:focus] stage=paste-dispatch error=\"{error}\"");
@@ -564,11 +678,12 @@ pub fn run() {
             }
 
             let shortcut = Shortcut::new(None, Code::Backslash);
-            app.global_shortcut().on_shortcut(shortcut, |app, _shortcut, event| {
-                if event.state() == ShortcutState::Pressed {
-                    let _ = toggle_launcher(app);
-                }
-            })?;
+            app.global_shortcut()
+                .on_shortcut(shortcut, |app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        let _ = toggle_launcher(app);
+                    }
+                })?;
 
             Ok(())
         })

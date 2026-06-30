@@ -18,6 +18,7 @@
 	import { Check, Clipboard, Command, Plus, Search, Terminal, X } from "@lucide/svelte";
 
 	type Mode = "search" | "create" | "edit";
+	type LauncherStage = "hidden" | "showing" | "shown" | "hiding";
 	type AliasResult = { kind: "alias"; alias: AliasRecord; exact: boolean };
 	type CreateResult = { kind: "create"; key: string; expansion: string };
 	type Result = AliasResult | CreateResult;
@@ -32,6 +33,7 @@
 	let status = $state("Ready");
 	let loaded = $state(false);
 	let focusDiagnosticsEnabled = $state(false);
+	let launcherStage = $state<LauncherStage>("hidden");
 
 	let editingId = $state<string | null>(null);
 	let draftKey = $state("");
@@ -128,6 +130,7 @@
 
 	async function hideLauncher() {
 		logFocusDiagnostics("frontend-before-hide");
+		launcherStage = "hiding";
 		await invoke("hide_launcher_command");
 		logFocusDiagnostics("frontend-after-hide");
 	}
@@ -349,15 +352,37 @@
 		});
 		focusLauncherField();
 
-		let unlisten: (() => void) | undefined;
+		const unlisteners: Array<() => void> = [];
+		void listen("launcher-showing", () => {
+			launcherStage = "showing";
+			window.requestAnimationFrame(() => {
+				if (launcherStage === "showing") {
+					launcherStage = "shown";
+				}
+			});
+		}).then((cleanup) => unlisteners.push(cleanup));
+
 		void listen("launcher-shown", () => {
+			if (launcherStage !== "showing") {
+				launcherStage = "shown";
+			}
 			logFocusDiagnostics("frontend-launcher-shown");
 			focusLauncherField();
-		}).then((cleanup) => {
-			unlisten = cleanup;
-		});
+		}).then((cleanup) => unlisteners.push(cleanup));
 
-		return () => unlisten?.();
+		void listen("launcher-hiding", () => {
+			launcherStage = "hiding";
+		}).then((cleanup) => unlisteners.push(cleanup));
+
+		void listen("launcher-hidden", () => {
+			launcherStage = "hidden";
+		}).then((cleanup) => unlisteners.push(cleanup));
+
+		return () => {
+			for (const unlisten of unlisteners) {
+				unlisten();
+			}
+		};
 	});
 </script>
 
@@ -366,6 +391,7 @@
 <main class="grid min-h-screen place-items-center bg-transparent p-16 text-foreground antialiased">
 	<section
 		bind:this={panelRef}
+		data-launcher-stage={launcherStage}
 		class="launcher-shell w-[720px] overflow-hidden rounded-lg border border-white/12 bg-zinc-950/92 text-zinc-50 shadow-2xl shadow-black/45 backdrop-blur-2xl"
 	>
 		<div class="flex h-14 items-center gap-3 px-4">
@@ -569,3 +595,35 @@
 		</footer>
 	</section>
 </main>
+
+<style>
+	.launcher-shell {
+		opacity: 0;
+		transform: translateY(-4px) scale(0.985);
+		transform-origin: center top;
+		transition:
+			opacity 60ms ease-out,
+			transform 60ms cubic-bezier(0.16, 1, 0.3, 1);
+		will-change: opacity, transform;
+	}
+
+	.launcher-shell[data-launcher-stage="shown"] {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+
+	.launcher-shell[data-launcher-stage="hiding"],
+	.launcher-shell[data-launcher-stage="hidden"] {
+		opacity: 0;
+		transform: translateY(-2px) scale(0.992);
+		transition-duration: 100ms;
+		transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.launcher-shell {
+			transform: none;
+			transition: none;
+		}
+	}
+</style>
