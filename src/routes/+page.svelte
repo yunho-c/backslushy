@@ -24,6 +24,9 @@
 	type CreateResult = { kind: "create"; key: string; expansion: string };
 	type Result = AliasResult | CreateResult;
 
+	const LAUNCHER_SHADOW_MARGIN_PX = 48;
+	const LAUNCHER_HEIGHT_EPSILON_PX = 1;
+
 	let query = $state("");
 	let inputRef: HTMLInputElement | null = $state(null);
 	let expansionRef: HTMLTextAreaElement | null = $state(null);
@@ -34,6 +37,7 @@
 	let status = $state("Ready");
 	let loaded = $state(false);
 	let focusDiagnosticsEnabled = $state(false);
+	let resizeDiagnosticsEnabled = $state(false);
 	let launcherStage = $state<LauncherStage>("hidden");
 
 	let editingId = $state<string | null>(null);
@@ -41,6 +45,8 @@
 	let draftExpansion = $state("");
 	let draftDescription = $state("");
 	let draftTags = $state("");
+	let lastRequestedLauncherHeight = 0;
+	let pendingLauncherResizeFrame: number | null = null;
 
 	function results(): Result[] {
 		const normalizedQuery = query.trim().toLowerCase();
@@ -127,6 +133,34 @@
 		};
 		console.info("[bkslash:focus]", payload);
 		void invoke("log_frontend_focus_diagnostic", { stage, detail: payload });
+	}
+
+	function rectSummary(rect: DOMRect) {
+		return {
+			x: Math.round(rect.x),
+			y: Math.round(rect.y),
+			width: Math.round(rect.width),
+			height: Math.round(rect.height),
+			top: Math.round(rect.top),
+			bottom: Math.round(rect.bottom),
+		};
+	}
+
+	function logResizeDiagnostics(stage: string, detail: Record<string, unknown> = {}) {
+		if (!resizeDiagnosticsEnabled) return;
+
+		const payload = {
+			stage,
+			mode,
+			launcherStage,
+			queryLength: query.length,
+			resultCount: results().length,
+			windowWidth: window.innerWidth,
+			windowHeight: window.innerHeight,
+			...detail,
+		};
+		console.info("[bkslash:resize]", payload);
+		void invoke("log_frontend_resize_diagnostic", { stage, detail: payload });
 	}
 
 	async function hideLauncher() {
@@ -349,6 +383,58 @@
 		});
 	}
 
+	function scheduleLauncherResize(animated = launcherStage === "shown") {
+		if (typeof window === "undefined") return;
+		if (pendingLauncherResizeFrame !== null) {
+			window.cancelAnimationFrame(pendingLauncherResizeFrame);
+		}
+
+		logResizeDiagnostics("frontend-schedule", { animated });
+		pendingLauncherResizeFrame = window.requestAnimationFrame(() => {
+			pendingLauncherResizeFrame = null;
+			void updateLauncherHeight(animated);
+		});
+	}
+
+	async function updateLauncherHeight(animated: boolean) {
+		await tick();
+		if (!panelRef) return;
+
+		const panelRect = panelRef.getBoundingClientRect();
+		const shellHeight = panelRect.height;
+		const targetHeight = Math.ceil(shellHeight + LAUNCHER_SHADOW_MARGIN_PX * 2);
+		logResizeDiagnostics("frontend-measure", {
+			animated,
+			panelRect: rectSummary(panelRect),
+			shellHeight,
+			shadowMargin: LAUNCHER_SHADOW_MARGIN_PX,
+			targetHeight,
+			lastRequestedLauncherHeight,
+		});
+		if (Math.abs(targetHeight - lastRequestedLauncherHeight) < LAUNCHER_HEIGHT_EPSILON_PX) {
+			logResizeDiagnostics("frontend-skip-unchanged", { targetHeight });
+			return;
+		}
+
+		try {
+			logResizeDiagnostics("frontend-before-request", { targetHeight, animated });
+			await invoke("set_launcher_height_command", {
+				height: targetHeight,
+				animated,
+			});
+			lastRequestedLauncherHeight = targetHeight;
+			logResizeDiagnostics("frontend-after-request", { targetHeight, animated });
+		} catch (error) {
+			lastRequestedLauncherHeight = 0;
+			logResizeDiagnostics("frontend-request-error", {
+				targetHeight,
+				animated,
+				message: error instanceof Error ? error.message : String(error),
+			});
+			console.warn("[bkslash] failed to resize launcher", error);
+		}
+	}
+
 	$effect(() => {
 		if (!loaded) return;
 		saveAliases(aliases);
@@ -359,6 +445,14 @@
 		selectedIndex = 0;
 	});
 
+	$effect(() => {
+		if (!loaded) return;
+		mode;
+		launcherStage;
+		results().length;
+		scheduleLauncherResize();
+	});
+
 	onMount(() => {
 		aliases = loadAliases();
 		loaded = true;
@@ -366,11 +460,25 @@
 			focusDiagnosticsEnabled = enabled;
 			logFocusDiagnostics("frontend-diagnostics-ready");
 		});
+		void invoke<boolean>("resize_diagnostics_enabled").then((enabled) => {
+			resizeDiagnosticsEnabled = enabled;
+			logResizeDiagnostics("frontend-diagnostics-ready");
+		});
 		focusLauncherField();
 
 		const unlisteners: Array<() => void> = [];
+		let resizeObserver: ResizeObserver | null = null;
+		void tick().then(() => {
+			if (!panelRef) return;
+
+			resizeObserver = new ResizeObserver(() => scheduleLauncherResize());
+			resizeObserver.observe(panelRef);
+			scheduleLauncherResize(false);
+		});
+
 		void listen("launcher-showing", () => {
 			launcherStage = "showing";
+			scheduleLauncherResize(false);
 			window.requestAnimationFrame(() => {
 				if (launcherStage === "showing") {
 					launcherStage = "shown";
@@ -383,6 +491,7 @@
 				launcherStage = "shown";
 			}
 			logFocusDiagnostics("frontend-launcher-shown");
+			scheduleLauncherResize(false);
 			focusLauncherField();
 		}).then((cleanup) => unlisteners.push(cleanup));
 
@@ -395,6 +504,10 @@
 		}).then((cleanup) => unlisteners.push(cleanup));
 
 		return () => {
+			resizeObserver?.disconnect();
+			if (pendingLauncherResizeFrame !== null) {
+				window.cancelAnimationFrame(pendingLauncherResizeFrame);
+			}
 			for (const unlisten of unlisteners) {
 				unlisten();
 			}
@@ -404,7 +517,7 @@
 
 <svelte:window onclick={handleWindowClick} onkeydown={handleKeydown} />
 
-<main class="grid min-h-screen place-items-center bg-transparent p-16 text-foreground antialiased">
+<main class="grid min-h-screen content-start justify-center bg-transparent px-[60px] py-12 text-foreground antialiased">
 	<section
 		bind:this={panelRef}
 		data-launcher-stage={launcherStage}
@@ -452,7 +565,7 @@
 		<Separator class="bg-white/10" />
 
 		{#if mode === "search"}
-			<div class="grid min-h-[230px] gap-1 px-2 py-2">
+			<div class="grid auto-rows-min content-start gap-1 px-2 py-2">
 				{#each results() as result, index}
 					{#if result.kind === "alias"}
 						{@const expansionPreview = formatAliasExpansion(result.alias.expansion)}
@@ -537,13 +650,13 @@
 						</button>
 					{/if}
 				{:else}
-					<div class="flex h-[216px] items-center justify-center px-6 text-center text-sm text-zinc-500">
+					<div class="flex h-24 items-center justify-center px-6 text-center text-sm text-zinc-500">
 						No aliases yet.
 					</div>
 				{/each}
 			</div>
 		{:else}
-			<form class="grid min-h-[230px] gap-3 px-4 py-4" onsubmit={(event) => event.preventDefault()}>
+			<form class="grid gap-3 px-4 py-4" onsubmit={(event) => event.preventDefault()}>
 				<div class="grid grid-cols-[170px_1fr] gap-3">
 					<label class="grid gap-1 text-xs font-medium text-zinc-500">
 						Alias

@@ -9,6 +9,14 @@ const LAUNCHER_CLOSE_ANIMATION_MS: u64 = 110;
 const LAUNCHER_ANIMATION_FRAME_MS: u64 = 16;
 #[cfg(target_os = "macos")]
 const PASTE_DISPATCH_DELAY_MS: u64 = LAUNCHER_CLOSE_ANIMATION_MS + 55;
+#[cfg(target_os = "macos")]
+const LAUNCHER_RESIZE_ANIMATION_MS: u64 = 90;
+#[cfg(target_os = "macos")]
+const LAUNCHER_MIN_HEIGHT: f64 = 220.0;
+#[cfg(target_os = "macos")]
+const LAUNCHER_MAX_HEIGHT: f64 = 560.0;
+#[cfg(target_os = "macos")]
+const LAUNCHER_SCREEN_MARGIN: f64 = 80.0;
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
@@ -19,9 +27,9 @@ struct MacosLauncherSurface {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
-struct LauncherPosition {
+struct LauncherAnchor {
     x: f64,
-    y: f64,
+    top_y: f64,
 }
 
 #[cfg(target_os = "macos")]
@@ -48,11 +56,15 @@ static MACOS_LAUNCHER_SURFACE: std::sync::Mutex<Option<MacosLauncherSurface>> =
     std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
-static SAVED_LAUNCHER_POSITION: std::sync::Mutex<Option<LauncherPosition>> =
+static SAVED_LAUNCHER_ANCHOR: std::sync::Mutex<Option<LauncherAnchor>> =
     std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 static LAUNCHER_ANIMATION_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_os = "macos")]
+static LAUNCHER_RESIZE_ANIMATION_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
@@ -70,7 +82,15 @@ fn macos_launcher_surface() -> Option<(
 }
 
 fn focus_diagnostics_enabled_flag() -> bool {
-    std::env::var("BKSLASH_FOCUS_DIAGNOSTICS")
+    env_flag_enabled("BKSLASH_FOCUS_DIAGNOSTICS")
+}
+
+fn resize_diagnostics_enabled_flag() -> bool {
+    env_flag_enabled("BKSLASH_RESIZE_DIAGNOSTICS")
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -94,6 +114,18 @@ fn next_launcher_animation_generation() -> u64 {
 #[cfg(target_os = "macos")]
 fn launcher_animation_generation() -> u64 {
     LAUNCHER_ANIMATION_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(target_os = "macos")]
+fn next_launcher_resize_animation_generation() -> u64 {
+    LAUNCHER_RESIZE_ANIMATION_GENERATION
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1
+}
+
+#[cfg(target_os = "macos")]
+fn launcher_resize_animation_generation() -> u64 {
+    LAUNCHER_RESIZE_ANIMATION_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(target_os = "macos")]
@@ -163,79 +195,299 @@ fn clamp_axis(value: f64, min: f64, max: f64) -> f64 {
 }
 
 #[cfg(target_os = "macos")]
-fn position_inside_rect(position: LauncherPosition, rect: &objc2_foundation::NSRect) -> bool {
-    position.x >= rect.origin.x
-        && position.x <= rect.origin.x + rect.size.width
-        && position.y >= rect.origin.y
-        && position.y <= rect.origin.y + rect.size.height
+fn point_inside_rect(x: f64, y: f64, rect: &objc2_foundation::NSRect) -> bool {
+    x >= rect.origin.x
+        && x <= rect.origin.x + rect.size.width
+        && y >= rect.origin.y
+        && y <= rect.origin.y + rect.size.height
 }
 
 #[cfg(target_os = "macos")]
-fn clamp_launcher_position(
-    position: LauncherPosition,
+fn visible_frame_for_launcher_frame(
     frame: objc2_foundation::NSRect,
-) -> LauncherPosition {
+) -> Option<objc2_foundation::NSRect> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSScreen;
 
     let Some(mtm) = MainThreadMarker::new() else {
-        return position;
+        return None;
     };
 
-    let window_center = LauncherPosition {
-        x: position.x + frame.size.width / 2.0,
-        y: position.y + frame.size.height / 2.0,
-    };
+    let center_x = frame.origin.x + frame.size.width / 2.0;
+    let center_y = frame.origin.y + frame.size.height / 2.0;
     let screens = NSScreen::screens(mtm);
 
-    let visible_frame = (0..screens.count())
+    (0..screens.count())
         .map(|index| screens.objectAtIndex(index).visibleFrame())
-        .find(|visible_frame| position_inside_rect(window_center, visible_frame))
-        .or_else(|| NSScreen::mainScreen(mtm).map(|screen| screen.visibleFrame()));
+        .find(|visible_frame| point_inside_rect(center_x, center_y, visible_frame))
+        .or_else(|| NSScreen::mainScreen(mtm).map(|screen| screen.visibleFrame()))
+}
 
-    let Some(visible_frame) = visible_frame else {
-        return position;
+#[cfg(target_os = "macos")]
+fn clamp_launcher_frame(frame: objc2_foundation::NSRect) -> objc2_foundation::NSRect {
+    let Some(visible_frame) = visible_frame_for_launcher_frame(frame) else {
+        return frame;
     };
 
-    LauncherPosition {
-        x: clamp_axis(
-            position.x,
-            visible_frame.origin.x,
-            visible_frame.origin.x + visible_frame.size.width - frame.size.width,
-        ),
-        y: clamp_axis(
-            position.y,
-            visible_frame.origin.y,
-            visible_frame.origin.y + visible_frame.size.height - frame.size.height,
-        ),
+    let mut clamped_frame = frame;
+    clamped_frame.origin.x = clamp_axis(
+        frame.origin.x,
+        visible_frame.origin.x,
+        visible_frame.origin.x + visible_frame.size.width - frame.size.width,
+    );
+    clamped_frame.origin.y = clamp_axis(
+        frame.origin.y,
+        visible_frame.origin.y,
+        visible_frame.origin.y + visible_frame.size.height - frame.size.height,
+    );
+    clamped_frame
+}
+
+#[cfg(target_os = "macos")]
+fn clamp_launcher_height(height: f64, frame: objc2_foundation::NSRect) -> f64 {
+    let screen_max_height = visible_frame_for_launcher_frame(frame)
+        .map(|visible_frame| visible_frame.size.height - LAUNCHER_SCREEN_MARGIN)
+        .unwrap_or(LAUNCHER_MAX_HEIGHT);
+    height.clamp(
+        LAUNCHER_MIN_HEIGHT,
+        LAUNCHER_MAX_HEIGHT.min(screen_max_height).max(LAUNCHER_MIN_HEIGHT),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn format_rect(rect: objc2_foundation::NSRect) -> String {
+    format!(
+        "x={:.1} y={:.1} width={:.1} height={:.1} top={:.1}",
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+        rect.origin.y + rect.size.height
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn format_saved_launcher_anchor() -> String {
+    SAVED_LAUNCHER_ANCHOR
+        .lock()
+        .ok()
+        .and_then(|saved_anchor| *saved_anchor)
+        .map(|anchor| format!("x={:.1} top_y={:.1}", anchor.x, anchor.top_y))
+        .unwrap_or_else(|| "none".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn log_resize_snapshot(stage: &str) {
+    if !resize_diagnostics_enabled_flag() {
+        return;
     }
+
+    let Some((panel, ns_view)) = macos_launcher_surface() else {
+        eprintln!("[bkslash:resize] stage={stage} skipped=no-panel");
+        return;
+    };
+
+    let panel_frame = panel.frame();
+    let view_frame = ns_view.frame();
+    let visible_frame = visible_frame_for_launcher_frame(panel_frame)
+        .map(format_rect)
+        .unwrap_or_else(|| "none".to_string());
+
+    eprintln!(
+        "[bkslash:resize] stage={stage} panel_visible={} panel_alpha={:.2} panel_frame=\"{}\" view_frame=\"{}\" visible_frame=\"{}\" saved_anchor=\"{}\"",
+        panel.isVisible(),
+        panel.alphaValue(),
+        format_rect(panel_frame),
+        format_rect(view_frame),
+        visible_frame,
+        format_saved_launcher_anchor(),
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn launcher_frame_for_height(
+    panel: &objc2_app_kit::NSPanel,
+    height: f64,
+) -> objc2_foundation::NSRect {
+    let mut frame = panel.frame();
+    let top_y = frame.origin.y + frame.size.height;
+    let height = clamp_launcher_height(height, frame);
+    frame.origin.y = top_y - height;
+    frame.size.height = height;
+    clamp_launcher_frame(frame)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_launcher_frame(
+    panel: &objc2_app_kit::NSPanel,
+    ns_view: &objc2_app_kit::NSView,
+    frame: objc2_foundation::NSRect,
+) {
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let view_frame = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(frame.size.width, frame.size.height),
+    );
+    ns_view.setFrame(view_frame);
+    panel.setFrame_display(frame, true);
+}
+
+#[cfg(target_os = "macos")]
+fn interpolated_rect(
+    from: objc2_foundation::NSRect,
+    to: objc2_foundation::NSRect,
+    progress: f64,
+) -> objc2_foundation::NSRect {
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let interpolate = |start: f64, end: f64| start + (end - start) * progress;
+    NSRect::new(
+        NSPoint::new(
+            interpolate(from.origin.x, to.origin.x),
+            interpolate(from.origin.y, to.origin.y),
+        ),
+        NSSize::new(
+            interpolate(from.size.width, to.size.width),
+            interpolate(from.size.height, to.size.height),
+        ),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn animate_launcher_frame(
+    window: &WebviewWindow,
+    generation: u64,
+    from_frame: objc2_foundation::NSRect,
+    to_frame: objc2_foundation::NSRect,
+) {
+    let window = window.clone();
+
+    std::thread::spawn(move || {
+        let frame_count = (LAUNCHER_RESIZE_ANIMATION_MS / LAUNCHER_ANIMATION_FRAME_MS).max(1);
+
+        for frame_index in 1..=frame_count {
+            std::thread::sleep(std::time::Duration::from_millis(
+                LAUNCHER_RESIZE_ANIMATION_MS / frame_count,
+            ));
+
+            let progress = frame_index as f64 / frame_count as f64;
+            let eased = ease_out_cubic(progress);
+            let current_frame = interpolated_rect(from_frame, to_frame, eased);
+            let window = window.clone();
+
+            let _ = window.run_on_main_thread(move || {
+                if launcher_resize_animation_generation() != generation {
+                    return;
+                }
+
+                if let Some((panel, ns_view)) = macos_launcher_surface() {
+                    apply_launcher_frame(panel, ns_view, current_frame);
+                    if resize_diagnostics_enabled_flag() {
+                        eprintln!(
+                            "[bkslash:resize] stage=animation-frame frame_index={frame_index} frame_count={frame_count} progress={progress:.2} eased={eased:.2} current_frame=\"{}\" target_frame=\"{}\"",
+                            format_rect(current_frame),
+                            format_rect(to_frame),
+                        );
+                    }
+                }
+            });
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn resize_launcher_panel(window: &WebviewWindow, height: f64, animated: bool) -> Result<(), String> {
+    use objc2::MainThreadMarker;
+
+    if MainThreadMarker::new().is_none() {
+        return Err("launcher resize must run on the main thread".to_string());
+    }
+
+    let Some((panel, ns_view)) = macos_launcher_surface() else {
+        return Err("launcher panel was not initialized".to_string());
+    };
+
+    let before_frame = panel.frame();
+    let frame = launcher_frame_for_height(panel, height);
+    let animated = animated && panel.isVisible();
+    let generation = next_launcher_resize_animation_generation();
+
+    if resize_diagnostics_enabled_flag() {
+        let clamped_height = frame.size.height;
+        let visible_frame = visible_frame_for_launcher_frame(before_frame)
+            .map(format_rect)
+            .unwrap_or_else(|| "none".to_string());
+        eprintln!(
+            "[bkslash:resize] stage=before-apply requested_height={height:.1} clamped_height={clamped_height:.1} animated={animated} before_frame=\"{}\" target_frame=\"{}\" visible_frame=\"{}\"",
+            format_rect(before_frame),
+            format_rect(frame),
+            visible_frame,
+        );
+    }
+
+    if animated {
+        animate_launcher_frame(window, generation, before_frame, frame);
+        log_resize_snapshot("after-animation-start");
+    } else {
+        apply_launcher_frame(panel, ns_view, frame);
+        log_resize_snapshot("after-apply");
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_delayed_resize_snapshot(window: &WebviewWindow) {
+    if !resize_diagnostics_enabled_flag() {
+        return;
+    }
+
+    let window = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        let _ = window.run_on_main_thread(|| {
+            log_resize_snapshot("after-delay-140ms");
+        });
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resize_launcher_window(window: &WebviewWindow, height: f64) -> Result<(), String> {
+    use tauri::{LogicalSize, Size};
+
+    let current_size = window.inner_size().map_err(|error| error.to_string())?;
+    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
+    let width = current_size.width as f64 / scale_factor;
+    window
+        .set_size(Size::Logical(LogicalSize::new(width, height.max(220.0))))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "macos")]
 fn save_launcher_position(panel: &objc2_app_kit::NSPanel) {
-    let origin = panel.frame().origin;
-    if let Ok(mut saved_position) = SAVED_LAUNCHER_POSITION.lock() {
-        *saved_position = Some(LauncherPosition {
-            x: origin.x,
-            y: origin.y,
+    let frame = panel.frame();
+    if let Ok(mut saved_anchor) = SAVED_LAUNCHER_ANCHOR.lock() {
+        *saved_anchor = Some(LauncherAnchor {
+            x: frame.origin.x,
+            top_y: frame.origin.y + frame.size.height,
         });
     }
 }
 
 #[cfg(target_os = "macos")]
 fn restore_launcher_position_or_center(panel: &objc2_app_kit::NSPanel) {
-    let saved_position = SAVED_LAUNCHER_POSITION
+    let saved_anchor = SAVED_LAUNCHER_ANCHOR
         .lock()
         .ok()
-        .and_then(|saved_position| *saved_position);
+        .and_then(|saved_anchor| *saved_anchor);
 
-    if let Some(saved_position) = saved_position {
-        let frame = panel.frame();
-        let position = clamp_launcher_position(saved_position, frame);
-        let mut origin = frame.origin;
-        origin.x = position.x;
-        origin.y = position.y;
-        panel.setFrameOrigin(origin);
+    if let Some(saved_anchor) = saved_anchor {
+        let mut frame = panel.frame();
+        frame.origin.x = saved_anchor.x;
+        frame.origin.y = saved_anchor.top_y - frame.size.height;
+        let frame = clamp_launcher_frame(frame);
+        panel.setFrame_display(frame, true);
         return;
     }
 
@@ -697,6 +949,30 @@ fn hide_launcher_command(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn set_launcher_height_command(
+    app: AppHandle,
+    height: f64,
+    animated: bool,
+) -> Result<(), String> {
+    let window = main_window(&app)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let result = resize_launcher_panel(&window, height, animated);
+        if result.is_ok() {
+            schedule_delayed_resize_snapshot(&window);
+        }
+        result
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = animated;
+        resize_launcher_window(&window, height)
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn start_launcher_drag_command() -> Result<(), String> {
@@ -816,6 +1092,18 @@ fn log_frontend_focus_diagnostic(stage: String, detail: serde_json::Value) {
     }
 }
 
+#[tauri::command]
+fn resize_diagnostics_enabled() -> bool {
+    resize_diagnostics_enabled_flag()
+}
+
+#[tauri::command]
+fn log_frontend_resize_diagnostic(stage: String, detail: serde_json::Value) {
+    if resize_diagnostics_enabled_flag() {
+        eprintln!("[bkslash:resize] stage={stage} frontend={detail}");
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -838,10 +1126,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             hide_launcher_command,
+            set_launcher_height_command,
             start_launcher_drag_command,
             paste_alias_command,
             focus_diagnostics_enabled,
-            log_frontend_focus_diagnostic
+            log_frontend_focus_diagnostic,
+            resize_diagnostics_enabled,
+            log_frontend_resize_diagnostic
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
